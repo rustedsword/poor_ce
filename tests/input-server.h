@@ -32,7 +32,7 @@ void input_server_pointer_motion(double x, double y);
 uint32_t input_server_pointer_button(uint32_t button, bool pressed);
 void input_server_pointer_wheel(int32_t value120);
 uint32_t input_server_keyboard_enter(void);
-void input_server_keyboard_modifiers(uint32_t depressed);
+void input_server_keyboard_modifiers(uint32_t depressed, uint32_t group);
 uint32_t input_server_key(uint32_t key, bool pressed);
 
 /* The selection or the primary selection writes into the returned pipe */

@@ -224,7 +224,7 @@ TEST(select_and_copy)
 	       input_server.primary_mimes == 5 && !input_server.has_selection);
 	assert(pasted(&loop, true, "text/plain;charset=utf-8", "rst line\nsecond"));
 	input_server_keyboard_enter();
-	input_server_keyboard_modifiers(CONTROL);
+	input_server_keyboard_modifiers(CONTROL, 0);
 	serial = input_server_key(KEY_C, true);
 	input_server_key(KEY_C, false);
 	client_roundtrip(&c);
@@ -301,7 +301,41 @@ TEST(keys_and_wheel_scroll)
 	input_server_key(KEY_ESC, false);
 	client_roundtrip(&c);
 	assert(c.view.top == top - 1 && !c.quit);
-	input_server_keyboard_modifiers(CONTROL);
+	input_server_keyboard_modifiers(CONTROL, 0);
+	input_server_key(KEY_Q, true);
+	client_roundtrip(&c);
+	assert(c.quit);
+	client_stop(&c);
+	stop(&loop);
+}
+
+/* The second layout of the server is Russian, the third has Dvorak's j on the key of c */
+TEST(shortcuts_in_other_layouts)
+{
+	static struct client c;
+	struct poor_loop loop;
+	uint32_t serial;
+
+	loop_init(&loop);
+	log_init(&loop, "input-test");
+	input_server_start(&loop);
+	client_start(&c, &loop, "text");
+	input_server_keyboard_enter();
+	input_server_keyboard_modifiers(CONTROL, 1);
+	serial = input_server_key(KEY_A, true);
+	input_server_key(KEY_A, false);
+	client_roundtrip(&c);
+	assert(c.view.anchor == 0 && c.view.caret == c.text.size && input_server.primary_serial == serial);
+	input_server_keyboard_modifiers(CONTROL, 2);
+	input_server_key(KEY_C, true);
+	input_server_key(KEY_C, false);
+	client_roundtrip(&c);
+	assert(!input_server.has_selection);
+	input_server_keyboard_modifiers(CONTROL, 1);
+	serial = input_server_key(KEY_C, true);
+	input_server_key(KEY_C, false);
+	client_roundtrip(&c);
+	assert(input_server.has_selection && input_server.selection_serial == serial);
 	input_server_key(KEY_Q, true);
 	client_roundtrip(&c);
 	assert(c.quit);

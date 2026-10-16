@@ -365,11 +365,36 @@ static const struct poor_wl_pointer_listener pointer_listener = {
 	.warp = pointer_warp,
 };
 
+static bool latin(xkb_keysym_t sym)
+{
+	return sym >= XKB_KEY_space && sym <= XKB_KEY_ydiaeresis;
+}
+
+/* In a layout without Latin letters, like Russian, shortcuts take the key's Latin keysym from the first layout that has one */
+static xkb_keysym_t shortcut_sym(struct xkb_state *state, xkb_keycode_t key)
+{
+	struct xkb_keymap *keymap = xkb_state_get_keymap(state);
+	xkb_layout_index_t active = xkb_state_key_get_layout(state, key);
+	xkb_keysym_t sym = xkb_state_key_get_one_sym(state, key);
+	const xkb_keysym_t *syms;
+
+	if (latin(sym))
+		return sym;
+	for (xkb_layout_index_t layout = 0; layout < xkb_keymap_num_layouts_for_key(keymap, key); layout++) {
+		xkb_level_index_t level = xkb_state_key_get_level(state, key, layout);
+
+		if (layout != active && xkb_keymap_key_get_syms_by_level(keymap, key, layout, level, &syms) == 1 &&
+		    latin(syms[0]))
+			return syms[0];
+	}
+	return sym;
+}
+
 /* Returns whether the key repeats */
 static bool key_action(struct seat *seat, uint32_t key, uint32_t serial)
 {
 	struct view *view = seat->view;
-	xkb_keysym_t sym = xkb_keysym_to_lower(xkb_state_key_get_one_sym(seat->state, key + 8));
+	xkb_keysym_t sym = xkb_keysym_to_lower(shortcut_sym(seat->state, key + 8));
 	bool control = xkb_state_mod_name_is_active(seat->state, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0;
 	ptrdiff_t lines = 0, columns = 0;
 

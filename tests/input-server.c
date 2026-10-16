@@ -34,9 +34,9 @@ static const char keymap[] =
 	"xkb_compatibility \"test\" { };\n"
 	"xkb_symbols \"test\" {\n"
 	"	key <ESC> { [ Escape ] }; key <LCTL> { [ Control_L ] }; key <UP> { [ Up ] }; key <DOWN> { [ Down ] };\n"
-	"	key <AD01> { type = \"ALPHABETIC\", [ q, Q ] };\n"
-	"	key <AC01> { type = \"ALPHABETIC\", [ a, A ] };\n"
-	"	key <AB03> { type = \"ALPHABETIC\", [ c, C ] };\n"
+	"	key <AD01> { type = \"ALPHABETIC\", [ q, Q ], [ Cyrillic_shorti, Cyrillic_SHORTI ] };\n"
+	"	key <AC01> { type = \"ALPHABETIC\", [ a, A ], [ Cyrillic_ef, Cyrillic_EF ] };\n"
+	"	key <AB03> { type = \"ALPHABETIC\", [ c, C ], [ Cyrillic_es, Cyrillic_ES ], [ j, J ] };\n"
 	"	modifier_map Control { <LCTL> };\n"
 	"};\n"
 	"};\n";
@@ -563,9 +563,9 @@ uint32_t input_server_keyboard_enter(void)
 	return serial;
 }
 
-void input_server_keyboard_modifiers(uint32_t depressed)
+void input_server_keyboard_modifiers(uint32_t depressed, uint32_t group)
 {
-	poor_wl_keyboard_send_modifiers(&server.keyboard, ++server.serial, depressed, 0, 0, 0);
+	poor_wl_keyboard_send_modifiers(&server.keyboard, ++server.serial, depressed, 0, 0, group);
 }
 
 uint32_t input_server_key(uint32_t key, bool pressed)
