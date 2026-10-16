@@ -36,7 +36,7 @@ shaders_h = []
 foreach shader : [ 'text.vert', 'text.frag' ]
 	shaders_h += custom_target(
 		shader,
-		command: [ glslang, '-V', '--target-env', 'vulkan1.3', '--vn', shader.underscorify(), '-o', '@OUTPUT@', '@INPUT@' ],
+		command: [ glslang, '-V', '--target-env', 'vulkan1.4', '--vn', shader.underscorify(), '-o', '@OUTPUT@', '@INPUT@' ],
 		input: shader,
 		output: shader + '.h',
 	)

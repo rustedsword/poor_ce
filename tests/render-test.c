@@ -60,29 +60,39 @@ struct readback {
 
 static void readback_init(struct readback *readback, const struct renderer *renderer, VkDeviceSize size)
 {
+	VkBufferUsageFlags2CreateInfo usage = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO,
+		.usage = VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+	};
 	VkBufferCreateInfo info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.pNext = &usage,
 		.size = size,
-		.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
+	VkBufferMemoryRequirementsInfo2 requirements_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2 };
+	VkMemoryRequirements2 requirements = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
+	VkPhysicalDeviceMemoryProperties2 properties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
+	const VkPhysicalDeviceMemoryProperties *memory = &properties.memoryProperties;
 	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
 	VkMemoryPropertyFlags flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-	VkPhysicalDeviceMemoryProperties properties;
-	VkMemoryRequirements requirements;
+	VkBindBufferMemoryInfo bind = { .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
+	VkMemoryMapInfo map = { .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO, .size = VK_WHOLE_SIZE };
 
 	assert(vkCreateBuffer(renderer->device, &info, nullptr, &readback->buffer) == VK_SUCCESS);
-	vkGetBufferMemoryRequirements(renderer->device, readback->buffer, &requirements);
-	vkGetPhysicalDeviceMemoryProperties(renderer->physical, &properties);
-	allocate.allocationSize = requirements.size;
+	requirements_info.buffer = bind.buffer = readback->buffer;
+	vkGetBufferMemoryRequirements2(renderer->device, &requirements_info, &requirements);
+	vkGetPhysicalDeviceMemoryProperties2(renderer->physical, &properties);
+	allocate.allocationSize = requirements.memoryRequirements.size;
 	allocate.memoryTypeIndex = UINT32_MAX;
-	foreach_array_index(arrview_first(properties.memoryTypeCount, properties.memoryTypes), i)
-		if (allocate.memoryTypeIndex == UINT32_MAX && requirements.memoryTypeBits & 1u << i &&
-		    (properties.memoryTypes[i].propertyFlags & flags) == flags)
+	foreach_array_index(arrview_first(memory->memoryTypeCount, memory->memoryTypes), i)
+		if (allocate.memoryTypeIndex == UINT32_MAX && requirements.memoryRequirements.memoryTypeBits & 1u << i &&
+		    (memory->memoryTypes[i].propertyFlags & flags) == flags)
 			allocate.memoryTypeIndex = i;
-	assert(vkAllocateMemory(renderer->device, &allocate, nullptr, &readback->memory) == VK_SUCCESS &&
-	       vkBindBufferMemory(renderer->device, readback->buffer, readback->memory, 0) == VK_SUCCESS &&
-	       vkMapMemory(renderer->device, readback->memory, 0, VK_WHOLE_SIZE, 0, &readback->map) == VK_SUCCESS);
+	assert(vkAllocateMemory(renderer->device, &allocate, nullptr, &readback->memory) == VK_SUCCESS);
+	bind.memory = map.memory = readback->memory;
+	assert(vkBindBufferMemory2(renderer->device, 1, &bind) == VK_SUCCESS &&
+	       vkMapMemory2(renderer->device, &map, &readback->map) == VK_SUCCESS);
 }
 
 static void readback_fini(struct readback *readback, const struct renderer *renderer)
@@ -104,9 +114,11 @@ static void read_image(struct renderer *renderer, VkImage image, uint32_t width,
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 	};
-	VkImageMemoryBarrier acquire = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+	VkImageMemoryBarrier2 acquire = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+		.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+		.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
 		.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
 		.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
@@ -114,34 +126,58 @@ static void read_image(struct renderer *renderer, VkImage image, uint32_t width,
 		.image = image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
 	};
-	VkBufferImageCopy region = {
+	VkDependencyInfo acquire_dependency = {
+		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.imageMemoryBarrierCount = 1,
+		.pImageMemoryBarriers = &acquire,
+	};
+	VkBufferImageCopy2 region = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
 		.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
 		.imageExtent = { width, height, 1 },
 	};
-	VkBufferMemoryBarrier host = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-		.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-		.dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+	VkCopyImageToBufferInfo2 copy = {
+		.sType = VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2,
+		.srcImage = image,
+		.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		.dstBuffer = readback->buffer,
+		.regionCount = 1,
+		.pRegions = &region,
+	};
+	VkBufferMemoryBarrier2 host = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+		.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+		.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+		.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT,
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.buffer = readback->buffer,
 		.size = VK_WHOLE_SIZE,
 	};
+	VkDependencyInfo host_dependency = {
+		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.bufferMemoryBarrierCount = 1,
+		.pBufferMemoryBarriers = &host,
+	};
 	VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-	VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1 };
+	VkCommandBufferSubmitInfo command_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
+	VkSubmitInfo2 submit = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+		.commandBufferInfoCount = 1,
+		.pCommandBufferInfos = &command_info,
+	};
 	VkCommandBuffer commands;
 	VkFence done;
 
 	assert(vkAllocateCommandBuffers(renderer->device, &commands_info, &commands) == VK_SUCCESS &&
 	       vkCreateFence(renderer->device, &fence_info, nullptr, &done) == VK_SUCCESS &&
 	       vkBeginCommandBuffer(commands, &begin) == VK_SUCCESS);
-	vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
-			     1, &acquire);
-	vkCmdCopyImageToBuffer(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback->buffer, 1, &region);
-	vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &host, 0,
-			     nullptr);
-	submit.pCommandBuffers = &commands;
-	assert(vkEndCommandBuffer(commands) == VK_SUCCESS && vkQueueSubmit(renderer->queue, 1, &submit, done) == VK_SUCCESS &&
+	vkCmdPipelineBarrier2(commands, &acquire_dependency);
+	vkCmdCopyImageToBuffer2(commands, &copy);
+	vkCmdPipelineBarrier2(commands, &host_dependency);
+	command_info.commandBuffer = commands;
+	assert(vkEndCommandBuffer(commands) == VK_SUCCESS && vkQueueSubmit2(renderer->queue, 1, &submit, done) == VK_SUCCESS &&
 	       vkWaitForFences(renderer->device, 1, &done, VK_TRUE, UINT64_MAX) == VK_SUCCESS);
 	vkDestroyFence(renderer->device, done, nullptr);
 	vkFreeCommandBuffers(renderer->device, renderer->pool, 1, &commands);

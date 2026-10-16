@@ -49,40 +49,51 @@ static struct render_target *target_of(struct renderer *renderer, struct poor_wl
 
 static uint32_t memory_type(const struct renderer *renderer, uint32_t types, VkMemoryPropertyFlags flags)
 {
-	VkPhysicalDeviceMemoryProperties properties;
+	VkPhysicalDeviceMemoryProperties2 properties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
+	const VkPhysicalDeviceMemoryProperties *memory = &properties.memoryProperties;
 
-	vkGetPhysicalDeviceMemoryProperties(renderer->physical, &properties);
-	foreach_array_index(arrview_first(properties.memoryTypeCount, properties.memoryTypes), i)
-		if (types & 1u << i && (properties.memoryTypes[i].propertyFlags & flags) == flags)
+	vkGetPhysicalDeviceMemoryProperties2(renderer->physical, &properties);
+	foreach_array_index(arrview_first(memory->memoryTypeCount, memory->memoryTypes), i)
+		if (types & 1u << i && (memory->memoryTypes[i].propertyFlags & flags) == flags)
 			return i;
 	return UINT32_MAX;
 }
 
-static bool buffer_init(struct renderer *renderer, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer,
+static bool buffer_init(struct renderer *renderer, VkDeviceSize size, VkBufferUsageFlags2 usage, VkBuffer *buffer,
 			VkDeviceMemory *memory, void **map)
 {
+	VkBufferUsageFlags2CreateInfo usage_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO,
+		.usage = usage,
+	};
 	VkBufferCreateInfo info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.pNext = &usage_info,
 		.size = size,
-		.usage = usage,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
+	VkBufferMemoryRequirementsInfo2 requirements_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2 };
+	VkMemoryRequirements2 requirements = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
 	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-	VkMemoryRequirements requirements;
+	VkBindBufferMemoryInfo bind = { .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
+	VkMemoryMapInfo map_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO, .size = VK_WHOLE_SIZE };
 
 	if (!check(vkCreateBuffer(renderer->device, &info, nullptr, buffer), "vkCreateBuffer"))
 		return false;
-	vkGetBufferMemoryRequirements(renderer->device, *buffer, &requirements);
-	allocate.allocationSize = requirements.size;
-	allocate.memoryTypeIndex = memory_type(renderer, requirements.memoryTypeBits,
+	requirements_info.buffer = bind.buffer = *buffer;
+	vkGetBufferMemoryRequirements2(renderer->device, &requirements_info, &requirements);
+	allocate.allocationSize = requirements.memoryRequirements.size;
+	allocate.memoryTypeIndex = memory_type(renderer, requirements.memoryRequirements.memoryTypeBits,
 					       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	if (allocate.memoryTypeIndex == UINT32_MAX) {
 		log_printf("poor_text_viewer: no host visible memory\n");
 		return false;
 	}
-	return check(vkAllocateMemory(renderer->device, &allocate, nullptr, memory), "vkAllocateMemory") &&
-	       check(vkBindBufferMemory(renderer->device, *buffer, *memory, 0), "vkBindBufferMemory") &&
-	       check(vkMapMemory(renderer->device, *memory, 0, VK_WHOLE_SIZE, 0, map), "vkMapMemory");
+	if (!check(vkAllocateMemory(renderer->device, &allocate, nullptr, memory), "vkAllocateMemory"))
+		return false;
+	bind.memory = map_info.memory = *memory;
+	return check(vkBindBufferMemory2(renderer->device, 1, &bind), "vkBindBufferMemory2") &&
+	       check(vkMapMemory2(renderer->device, &map_info, map), "vkMapMemory2");
 }
 
 /* The last drawing is done by then, which Vulkan learns from the fence */
@@ -125,9 +136,9 @@ static bool target_init(struct renderer *renderer, struct render_target *target,
 	return check(vkCreateImageView(renderer->device, &view_info, nullptr, &target->view), "vkCreateImageView") &&
 	       check(vkAllocateCommandBuffers(renderer->device, &commands_info, &target->commands), "vkAllocateCommandBuffers") &&
 	       check(vkCreateFence(renderer->device, &fence_info, nullptr, &target->done), "vkCreateFence") &&
-	       buffer_init(renderer, RENDER_INSTANCES * sizeof(struct instance), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+	       buffer_init(renderer, RENDER_INSTANCES * sizeof(struct instance), VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT,
 			   &target->instances, &target->instance_memory, &target->instance_map) &&
-	       buffer_init(renderer, ATLAS_SIZE * ATLAS_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &target->staging,
+	       buffer_init(renderer, ATLAS_SIZE * ATLAS_SIZE, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT, &target->staging,
 			   &target->staging_memory, &target->staging_map);
 }
 
@@ -167,12 +178,16 @@ const struct poor_wl_swapchain_allocator renderer_allocator = {
 
 static bool device_queue_family(VkPhysicalDevice physical, uint32_t *family)
 {
-	VkQueueFamilyProperties families[16];
+	VkQueueFamilyProperties2 families[16];
 	uint32_t count = ARRAY_SIZE(families);
 
-	vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families);
+	foreach_array_ref(families, properties) {
+		properties->sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+		properties->pNext = nullptr;
+	}
+	vkGetPhysicalDeviceQueueFamilyProperties2(physical, &count, families);
 	foreach_array_index(arrview_first(count, families), i) {
-		if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+		if (families[i].queueFamilyProperties.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
 			*family = i;
 			return true;
 		}
@@ -198,14 +213,21 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 	VkApplicationInfo application = {
 		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 		.pApplicationName = "poor_text_viewer",
-		.apiVersion = VK_API_VERSION_1_3,
+		.apiVersion = VK_API_VERSION_1_4,
 	};
 	VkInstanceCreateInfo instance_info = {
 		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
 		.pApplicationInfo = &application,
 	};
-	VkPhysicalDeviceVulkan13Features features = {
+	VkPhysicalDeviceVulkan14Features features_14 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+		.maintenance5 = VK_TRUE,
+		.pushDescriptor = VK_TRUE,
+	};
+	VkPhysicalDeviceVulkan13Features features_13 = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+		.pNext = &features_14,
+		.synchronization2 = VK_TRUE,
 		.dynamicRendering = VK_TRUE,
 	};
 	VkDeviceQueueCreateInfo queue_info = {
@@ -213,9 +235,10 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 		.queueCount = 1,
 		.pQueuePriorities = &priority,
 	};
+	VkDeviceQueueInfo2 queue = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2 };
 	VkDeviceCreateInfo device_info = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-		.pNext = &features,
+		.pNext = &features_13,
 		.queueCreateInfoCount = 1,
 		.pQueueCreateInfos = &queue_info,
 		.enabledExtensionCount = ARRAY_SIZE(poor_wl_vulkan_device_extensions),
@@ -230,7 +253,7 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 		.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
 	};
 	VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &export };
-	VkPhysicalDeviceProperties properties;
+	VkPhysicalDeviceProperties2 properties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
 
 	/* Mesa's device-select layer would connect to the compositor with the system libwayland and block, to sort GPUs */
 	setenv("NODEVICE_SELECT", "1", 1);
@@ -238,20 +261,19 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 		return false;
 	renderer->physical = poor_wl_vulkan_find_device(vkGetInstanceProcAddr, renderer->instance, device, render_minor);
 	if (renderer->physical) {
-		vkGetPhysicalDeviceProperties(renderer->physical, &properties);
-		copy_array(renderer->device_name, properties.deviceName);
+		vkGetPhysicalDeviceProperties2(renderer->physical, &properties);
+		copy_array(renderer->device_name, properties.properties.deviceName);
 	}
-	if (!renderer->physical || properties.apiVersion < VK_API_VERSION_1_3 ||
+	if (!renderer->physical || properties.properties.apiVersion < VK_API_VERSION_1_4 ||
 	    !device_queue_family(renderer->physical, &renderer->family) || !device_exports_fences(renderer->physical)) {
-		log_printf("poor_text_viewer: no Vulkan 1.3 device with dmabufs, modifiers and fences for %u:%u\n", major(device),
+		log_printf("poor_text_viewer: no Vulkan 1.4 device with dmabufs, modifiers and fences for %u:%u\n", major(device),
 			   minor(device));
 		return false;
 	}
-	queue_info.queueFamilyIndex = renderer->family;
-	pool_info.queueFamilyIndex = renderer->family;
+	queue_info.queueFamilyIndex = queue.queueFamilyIndex = pool_info.queueFamilyIndex = renderer->family;
 	if (!check(vkCreateDevice(renderer->physical, &device_info, nullptr, &renderer->device), "vkCreateDevice"))
 		return false;
-	vkGetDeviceQueue(renderer->device, renderer->family, 0, &renderer->queue);
+	vkGetDeviceQueue2(renderer->device, &queue, &renderer->queue);
 	renderer->get_semaphore_fd = (PFN_vkGetSemaphoreFdKHR)vkGetDeviceProcAddr(renderer->device, "vkGetSemaphoreFdKHR");
 	poor_wl_vulkan_init(&renderer->vulkan, loop, vkGetInstanceProcAddr, renderer->instance, renderer->physical,
 			    renderer->device, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
@@ -281,49 +303,54 @@ static bool atlas_image_init(struct renderer *renderer)
 		.format = VK_FORMAT_R8_UNORM,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
 	};
+	VkImageMemoryRequirementsInfo2 requirements_info = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2 };
+	VkMemoryRequirements2 requirements = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
 	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-	VkMemoryRequirements requirements;
+	VkBindImageMemoryInfo bind = { .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO };
+	uint32_t types;
 
 	if (!check(vkCreateImage(renderer->device, &image_info, nullptr, &renderer->atlas_image), "vkCreateImage"))
 		return false;
-	vkGetImageMemoryRequirements(renderer->device, renderer->atlas_image, &requirements);
-	allocate.allocationSize = requirements.size;
-	allocate.memoryTypeIndex = memory_type(renderer, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	requirements_info.image = bind.image = view_info.image = renderer->atlas_image;
+	vkGetImageMemoryRequirements2(renderer->device, &requirements_info, &requirements);
+	types = requirements.memoryRequirements.memoryTypeBits;
+	allocate.allocationSize = requirements.memoryRequirements.size;
+	allocate.memoryTypeIndex = memory_type(renderer, types, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	if (allocate.memoryTypeIndex == UINT32_MAX)
-		allocate.memoryTypeIndex = memory_type(renderer, requirements.memoryTypeBits, 0);
-	view_info.image = renderer->atlas_image;
-	return check(vkAllocateMemory(renderer->device, &allocate, nullptr, &renderer->atlas_memory), "vkAllocateMemory") &&
-	       check(vkBindImageMemory(renderer->device, renderer->atlas_image, renderer->atlas_memory, 0), "vkBindImageMemory") &&
+		allocate.memoryTypeIndex = memory_type(renderer, types, 0);
+	if (!check(vkAllocateMemory(renderer->device, &allocate, nullptr, &renderer->atlas_memory), "vkAllocateMemory"))
+		return false;
+	bind.memory = renderer->atlas_memory;
+	return check(vkBindImageMemory2(renderer->device, 1, &bind), "vkBindImageMemory2") &&
 	       check(vkCreateImageView(renderer->device, &view_info, nullptr, &renderer->atlas_view), "vkCreateImageView");
 }
 
-static bool shader_init(struct renderer *renderer, size_t size, const uint32_t (*code)[size], VkShaderModule *module)
-{
-	VkShaderModuleCreateInfo info = {
-		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = ARRAY_SIZE_BYTES(code),
-		.pCode = *code,
-	};
-
-	return check(vkCreateShaderModule(renderer->device, &info, nullptr, module), "vkCreateShaderModule");
-}
-
 /* Each glyph is a strip of two triangles that covers its cell */
-static bool pipeline_create(struct renderer *renderer, VkShaderModule vertex, VkShaderModule fragment)
+static bool pipeline_create(struct renderer *renderer)
 {
 	static const VkFormat format = RENDER_FORMAT;
 	static const VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkShaderModuleCreateInfo vertex = {
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = ARRAY_SIZE_BYTES(text_vert),
+		.pCode = text_vert,
+	};
+	VkShaderModuleCreateInfo fragment = {
+		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+		.codeSize = ARRAY_SIZE_BYTES(text_frag),
+		.pCode = text_frag,
+	};
 	VkPipelineShaderStageCreateInfo stages[] = {
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.pNext = &vertex,
 			.stage = VK_SHADER_STAGE_VERTEX_BIT,
-			.module = vertex,
 			.pName = "main",
 		},
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+			.pNext = &fragment,
 			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-			.module = fragment,
 			.pName = "main",
 		},
 	};
@@ -430,28 +457,9 @@ static bool pipeline_init(struct renderer *renderer)
 	};
 	VkDescriptorSetLayoutCreateInfo set_layout_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT,
 		.bindingCount = 1,
 		.pBindings = &binding,
-	};
-	VkDescriptorPoolSize pool_size = { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 };
-	VkDescriptorPoolCreateInfo pool_info = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1,
-		.poolSizeCount = 1,
-		.pPoolSizes = &pool_size,
-	};
-	VkDescriptorSetAllocateInfo set_info = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-		.descriptorSetCount = 1,
-		.pSetLayouts = &renderer->set_layout,
-	};
-	VkDescriptorImageInfo image_info = { .imageView = renderer->atlas_view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
-	VkWriteDescriptorSet write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstBinding = 0,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		.pImageInfo = &image_info,
 	};
 	VkPushConstantRange push = {
 		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
@@ -464,26 +472,13 @@ static bool pipeline_init(struct renderer *renderer)
 		.pushConstantRangeCount = 1,
 		.pPushConstantRanges = &push,
 	};
-	VkShaderModule vertex = VK_NULL_HANDLE, fragment = VK_NULL_HANDLE;
-	bool ok;
 
-	if (!check(vkCreateSampler(renderer->device, &sampler_info, nullptr, &renderer->sampler), "vkCreateSampler") ||
-	    !check(vkCreateDescriptorSetLayout(renderer->device, &set_layout_info, nullptr, &renderer->set_layout),
-		   "vkCreateDescriptorSetLayout") ||
-	    !check(vkCreateDescriptorPool(renderer->device, &pool_info, nullptr, &renderer->descriptor_pool),
-		   "vkCreateDescriptorPool"))
-		return false;
-	set_info.descriptorPool = renderer->descriptor_pool;
-	if (!check(vkAllocateDescriptorSets(renderer->device, &set_info, &renderer->set), "vkAllocateDescriptorSets") ||
-	    !check(vkCreatePipelineLayout(renderer->device, &layout_info, nullptr, &renderer->layout), "vkCreatePipelineLayout"))
-		return false;
-	write.dstSet = renderer->set;
-	vkUpdateDescriptorSets(renderer->device, 1, &write, 0, nullptr);
-	ok = shader_init(renderer, ARRAY_SIZE(text_vert), &text_vert, &vertex) &&
-	     shader_init(renderer, ARRAY_SIZE(text_frag), &text_frag, &fragment) && pipeline_create(renderer, vertex, fragment);
-	vkDestroyShaderModule(renderer->device, vertex, nullptr);
-	vkDestroyShaderModule(renderer->device, fragment, nullptr);
-	return ok;
+	return check(vkCreateSampler(renderer->device, &sampler_info, nullptr, &renderer->sampler), "vkCreateSampler") &&
+	       check(vkCreateDescriptorSetLayout(renderer->device, &set_layout_info, nullptr, &renderer->set_layout),
+		     "vkCreateDescriptorSetLayout") &&
+	       check(vkCreatePipelineLayout(renderer->device, &layout_info, nullptr, &renderer->layout),
+		     "vkCreatePipelineLayout") &&
+	       pipeline_create(renderer);
 }
 
 bool renderer_init(struct renderer *renderer, struct poor_loop *loop, struct atlas *atlas, dev_t device, uint32_t *render_minor)
@@ -498,7 +493,6 @@ bool renderer_init(struct renderer *renderer, struct poor_loop *loop, struct atl
 	renderer->drained = VK_NULL_HANDLE;
 	renderer->sampler = VK_NULL_HANDLE;
 	renderer->set_layout = VK_NULL_HANDLE;
-	renderer->descriptor_pool = VK_NULL_HANDLE;
 	renderer->layout = VK_NULL_HANDLE;
 	renderer->pipeline = VK_NULL_HANDLE;
 	renderer->atlas_image = VK_NULL_HANDLE;
@@ -516,7 +510,6 @@ void renderer_fini(struct renderer *renderer)
 		vkDestroySemaphore(renderer->device, renderer->rendered, nullptr);
 		vkDestroyPipeline(renderer->device, renderer->pipeline, nullptr);
 		vkDestroyPipelineLayout(renderer->device, renderer->layout, nullptr);
-		vkDestroyDescriptorPool(renderer->device, renderer->descriptor_pool, nullptr);
 		vkDestroyDescriptorSetLayout(renderer->device, renderer->set_layout, nullptr);
 		vkDestroySampler(renderer->device, renderer->sampler, nullptr);
 		vkDestroyImageView(renderer->device, renderer->atlas_view, nullptr);
@@ -613,15 +606,28 @@ static size_t build_selection(struct renderer *renderer, const struct view *view
 	return count;
 }
 
+static void image_barrier(VkCommandBuffer commands, const VkImageMemoryBarrier2 *barrier)
+{
+	VkDependencyInfo dependency = {
+		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.imageMemoryBarrierCount = 1,
+		.pImageMemoryBarriers = barrier,
+	};
+
+	vkCmdPipelineBarrier2(commands, &dependency);
+}
+
 /* The rows that changed since the last upload go through the staging buffer of the target */
 static void upload_atlas(struct renderer *renderer, struct render_target *target)
 {
 	struct atlas *atlas = renderer->atlas;
 	auto staging = (uint8_t (*)[ATLAS_SIZE][ATLAS_SIZE])target->staging_map;
 	size_t rows = atlas->dirty_bottom - atlas->dirty_top;
-	VkImageMemoryBarrier barrier = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+	VkImageMemoryBarrier2 barrier = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+		.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+		.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
 		.oldLayout = renderer->atlas_valid ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -629,21 +635,30 @@ static void upload_atlas(struct renderer *renderer, struct render_target *target
 		.image = renderer->atlas_image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
 	};
-	VkBufferImageCopy region = {
+	VkBufferImageCopy2 region = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
 		.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
 		.imageOffset = { 0, atlas->dirty_top, 0 },
 		.imageExtent = { ATLAS_SIZE, rows, 1 },
 	};
+	VkCopyBufferToImageInfo2 copy = {
+		.sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
+		.srcBuffer = target->staging,
+		.dstImage = renderer->atlas_image,
+		.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.regionCount = 1,
+		.pRegions = &region,
+	};
 
 	copy_array(arrview_first(rows, staging), arrview(atlas->dirty_top, rows, atlas->pixels));
-	vkCmdPipelineBarrier(target->commands, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
-			     0, nullptr, 1, &barrier);
-	vkCmdCopyBufferToImage(target->commands, target->staging, renderer->atlas_image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
-	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	image_barrier(target->commands, &barrier);
+	vkCmdCopyBufferToImage2(target->commands, &copy);
+	barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+	barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+	barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+	barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
 	barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-	vkCmdPipelineBarrier(target->commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
-			     0, nullptr, 1, &barrier);
+	image_barrier(target->commands, &barrier);
 	renderer->atlas_valid = true;
 	atlas_uploaded(atlas);
 }
@@ -653,19 +668,41 @@ static void draw_glyphs(struct renderer *renderer, struct render_target *target,
 	VkViewport viewport = { .width = view->width, .height = view->height, .maxDepth = 1.0f };
 	VkRect2D scissor = { .extent = { view->width, view->height } };
 	VkDeviceSize offset = 0;
+	VkDescriptorImageInfo atlas = { .imageView = renderer->atlas_view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
+	VkWriteDescriptorSet write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstBinding = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.pImageInfo = &atlas,
+	};
+	VkPushDescriptorSetInfo descriptors = {
+		.sType = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO,
+		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+		.layout = renderer->layout,
+		.set = 0,
+		.descriptorWriteCount = 1,
+		.pDescriptorWrites = &write,
+	};
 	struct push_constants constants = {
 		.viewport = { view->width, view->height },
 		.cell = { view->cell_width, view->cell_height },
 		.atlas = { ATLAS_SIZE, ATLAS_SIZE },
 	};
+	VkPushConstantsInfo push = {
+		.sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
+		.layout = renderer->layout,
+		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+		.size = sizeof(constants),
+		.pValues = &constants,
+	};
 
 	vkCmdBindPipeline(target->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipeline);
-	vkCmdBindDescriptorSets(target->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->layout, 0, 1, &renderer->set, 0,
-				nullptr);
+	vkCmdPushDescriptorSet2(target->commands, &descriptors);
 	vkCmdSetViewport(target->commands, 0, 1, &viewport);
 	vkCmdSetScissor(target->commands, 0, 1, &scissor);
-	vkCmdPushConstants(target->commands, renderer->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(constants), &constants);
-	vkCmdBindVertexBuffers(target->commands, 0, 1, &target->instances, &offset);
+	vkCmdPushConstants2(target->commands, &push);
+	vkCmdBindVertexBuffers2(target->commands, 0, 1, &target->instances, &offset, nullptr, nullptr);
 	vkCmdDraw(target->commands, 4, count, 0, 0);
 }
 
@@ -682,9 +719,11 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 	};
-	VkImageMemoryBarrier draw = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	VkImageMemoryBarrier2 draw = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+		.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 		.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -692,9 +731,11 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		.image = image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
 	};
-	VkImageMemoryBarrier release = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+	VkImageMemoryBarrier2 release = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+		.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+		.dstStageMask = VK_PIPELINE_STAGE_2_NONE,
 		.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
 		.srcQueueFamilyIndex = renderer->family,
@@ -721,12 +762,21 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 		.clearValue = { .color = view->focused ? SELECTION : SELECTION_INACTIVE },
 	};
-	VkSubmitInfo submit = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-		.commandBufferCount = 1,
-		.pCommandBuffers = &target->commands,
-		.signalSemaphoreCount = 1,
-		.pSignalSemaphores = &renderer->rendered,
+	VkCommandBufferSubmitInfo command_info = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+		.commandBuffer = target->commands,
+	};
+	VkSemaphoreSubmitInfo signal = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+		.semaphore = renderer->rendered,
+		.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+	};
+	VkSubmitInfo2 submit = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+		.commandBufferInfoCount = 1,
+		.pCommandBufferInfos = &command_info,
+		.signalSemaphoreInfoCount = 1,
+		.pSignalSemaphoreInfos = &signal,
 	};
 	VkSemaphoreGetFdInfoKHR get = {
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
@@ -750,18 +800,16 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		return -1;
 	if (renderer->atlas->dirty_top < renderer->atlas->dirty_bottom)
 		upload_atlas(renderer, target);
-	vkCmdPipelineBarrier(target->commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-			     0, 0, nullptr, 0, nullptr, 1, &draw);
+	image_barrier(target->commands, &draw);
 	vkCmdBeginRendering(target->commands, &rendering);
 	if (rects)
 		vkCmdClearAttachments(target->commands, 1, &selection, rects, renderer->rects);
 	if (glyphs)
 		draw_glyphs(renderer, target, view, glyphs);
 	vkCmdEndRendering(target->commands);
-	vkCmdPipelineBarrier(target->commands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-			     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &release);
+	image_barrier(target->commands, &release);
 	if (!check(vkEndCommandBuffer(target->commands), "vkEndCommandBuffer") ||
-	    !check(vkQueueSubmit(renderer->queue, 1, &submit, target->done), "vkQueueSubmit") ||
+	    !check(vkQueueSubmit2(renderer->queue, 1, &submit, target->done), "vkQueueSubmit2") ||
 	    !check(renderer->get_semaphore_fd(renderer->device, &get, &fence), "vkGetSemaphoreFdKHR"))
 		return -1;
 	return fence;
@@ -776,10 +824,14 @@ int renderer_idle_fence(struct renderer *renderer)
 	};
 	VkSemaphoreCreateInfo info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &export };
 	VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-	VkSubmitInfo submit = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-		.signalSemaphoreCount = 1,
-		.pSignalSemaphores = &renderer->idle,
+	VkSemaphoreSubmitInfo signal = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+		.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+	};
+	VkSubmitInfo2 submit = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+		.signalSemaphoreInfoCount = 1,
+		.pSignalSemaphoreInfos = &signal,
 	};
 	VkSemaphoreGetFdInfoKHR get = {
 		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
@@ -788,10 +840,11 @@ int renderer_idle_fence(struct renderer *renderer)
 	int fd = -1;
 
 	if (!renderer->queue || !check(vkCreateSemaphore(renderer->device, &info, nullptr, &renderer->idle), "vkCreateSemaphore") ||
-	    !check(vkCreateFence(renderer->device, &fence_info, nullptr, &renderer->drained), "vkCreateFence") ||
-	    !check(vkQueueSubmit(renderer->queue, 1, &submit, renderer->drained), "vkQueueSubmit"))
+	    !check(vkCreateFence(renderer->device, &fence_info, nullptr, &renderer->drained), "vkCreateFence"))
 		return -1;
-	get.semaphore = renderer->idle;
+	signal.semaphore = get.semaphore = renderer->idle;
+	if (!check(vkQueueSubmit2(renderer->queue, 1, &submit, renderer->drained), "vkQueueSubmit2"))
+		return -1;
 	check(renderer->get_semaphore_fd(renderer->device, &get, &fd), "vkGetSemaphoreFdKHR");
 	return fd;
 }

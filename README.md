@@ -15,7 +15,7 @@ Everything runs on io_uring through poor_loop, reading the file included. The
 font is Noto Sans Mono, embedded with `#embed` and drawn with FreeType.
 
 It needs Linux 6.16 or newer, a compositor with linux-dmabuf 4 and
-linux-drm-syncobj-v1, a Vulkan 1.3 driver, a C23 compiler, xkbcommon, FreeType
+linux-drm-syncobj-v1, a Vulkan 1.4 driver, a C23 compiler, xkbcommon, FreeType
 and glslangValidator. Installed poor_wayland, poor_wayland_swapchain and
 wayland-protocols are used if there are, the submodules otherwise.
 

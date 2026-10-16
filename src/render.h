@@ -39,8 +39,6 @@ struct renderer {
 	VkFence drained;
 	VkSampler sampler;
 	VkDescriptorSetLayout set_layout;
-	VkDescriptorPool descriptor_pool;
-	VkDescriptorSet set;
 	VkPipelineLayout layout;
 	VkPipeline pipeline;
 	VkImage atlas_image;
@@ -53,7 +51,7 @@ struct renderer {
 	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
 };
 
-/* A Vulkan 1.3 device on 'device', which the dmabuf feedback names, and the minor of its render node */
+/* A Vulkan 1.4 device on 'device', which the dmabuf feedback names, and the minor of its render node */
 [[nodiscard]] bool renderer_init(struct renderer *renderer, struct poor_loop *loop, struct atlas *atlas, dev_t device,
 				 uint32_t *render_minor);
 /* The drawing has to be done, see renderer_idle_fence() */
