@@ -141,6 +141,7 @@ static int renderer_allocate(void *data, struct poor_wl_swapchain_buffer *buffer
 
 	if (ret < 0)
 		return ret;
+	assert(((struct poor_wl_vulkan_image *)buffer->data)->format == RENDER_FORMAT);
 	if (!target_init(renderer, target, ((struct poor_wl_vulkan_image *)buffer->data)->image)) {
 		target_fini(renderer, target);
 		foreach_array_const_ref(arrview_first(buffer->plane_count, buffer->planes), plane)
@@ -253,7 +254,7 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 	vkGetDeviceQueue(renderer->device, renderer->family, 0, &renderer->queue);
 	renderer->get_semaphore_fd = (PFN_vkGetSemaphoreFdKHR)vkGetDeviceProcAddr(renderer->device, "vkGetSemaphoreFdKHR");
 	poor_wl_vulkan_init(&renderer->vulkan, loop, vkGetInstanceProcAddr, renderer->instance, renderer->physical,
-			    renderer->device, RENDER_FORMAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+			    renderer->device, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
 	return check(vkCreateCommandPool(renderer->device, &pool_info, nullptr, &renderer->pool), "vkCreateCommandPool") &&
 	       check(vkCreateSemaphore(renderer->device, &semaphore_info, nullptr, &renderer->rendered), "vkCreateSemaphore");
 }

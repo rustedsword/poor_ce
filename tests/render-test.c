@@ -186,7 +186,7 @@ TEST(render_selection)
 	buffer->swapchain = &swapchain;
 	buffer->width = 200;
 	buffer->height = 100;
-	assert(!renderer_allocator.allocate(&renderer, buffer, DRM_FORMAT_XRGB8888, ARRAY_SIZE(LINEAR), &LINEAR, false));
+	assert(!renderer_allocator.allocate(&renderer, buffer, RENDER_DRM_FORMAT, ARRAY_SIZE(LINEAR), &LINEAR, false));
 	assert(buffer->modifier == DRM_FORMAT_MOD_LINEAR && buffer->plane_count == 1);
 	readback_init(&readback, &renderer, buffer->width * buffer->height * 4);
 	text_init(&text, arrview_str(contents), lines);

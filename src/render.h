@@ -2,6 +2,7 @@
 #ifndef RENDER_H
 #define RENDER_H
 
+#include <drm/drm_fourcc.h>
 #include <poor_wayland_swapchain_vulkan.h>
 #include <sys/types.h>
 #include <vulkan/vulkan.h>
@@ -9,6 +10,8 @@
 #include "atlas.h"
 #include "view.h"
 
+/* The pipeline draws into images of the Vulkan format of the DRM format of the swapchain */
+constexpr uint32_t RENDER_DRM_FORMAT = DRM_FORMAT_XRGB8888;
 constexpr VkFormat RENDER_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
 constexpr size_t RENDER_INSTANCES = 1 << 18;
 constexpr size_t RENDER_ROWS = 2048;

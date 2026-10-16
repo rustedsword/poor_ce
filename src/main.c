@@ -504,8 +504,8 @@ static void window_init(struct app *app)
 		poor_wp_fractional_scale_manager_v1_get_fractional_scale(&app->fractional_manager, &app->fractional, &app->surface);
 		poor_wp_fractional_scale_v1_add_listener(&app->fractional, &fractional_listener, app);
 	}
-	poor_wl_swapchain_init(&app->swapchain, &app->loop, &app->dmabuf, &app->surface, DRM_FORMAT_XRGB8888, swapchain_device,
-			       swapchain_frame, swapchain_error);
+	poor_wl_swapchain_init(&app->swapchain, &app->loop, &app->dmabuf, &app->surface, ((const uint32_t[]){ RENDER_DRM_FORMAT }),
+			       swapchain_device, swapchain_frame, swapchain_error);
 	app->swapchain_started = true;
 	poor_wl_surface_commit(&app->surface);
 }
