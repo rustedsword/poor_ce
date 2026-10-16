@@ -75,8 +75,8 @@ render_test = executable(
 	render_sources,
 	shaders_h,
 	client_protocol_h,
-	dependencies: [ test_runner_dep, swapchain_dep, client_dep, poor_loop_dep, vulkan_dep, freetype_dep,
-			cc.find_library('m', required: false) ],
+	dependencies: [ test_runner_dep, swapchain_dep, client_dep, poor_loop_dep, vulkan_dep, vulkan_initializers_dep,
+			freetype_dep, cc.find_library('m', required: false) ],
 )
 test(
 	'render-test',

@@ -20,7 +20,7 @@ jobs:
         build: [sanitizers, release]
         deps: [system, bundled]
     env:
-      MESON_ARGS: -Dwerror=true ${{ matrix.build == 'sanitizers' && '-Dbuildtype=debug -Db_sanitize=address,undefined' || '-Dbuildtype=release' }} ${{ matrix.deps == 'system' && '--wrap-mode=nofallback' || '--force-fallback-for=poor_wayland_swapchain,poor_wayland,wayland-protocols,poor_loop,liburing,poor_base' }}
+      MESON_ARGS: -Dwerror=true ${{ matrix.build == 'sanitizers' && '-Dbuildtype=debug -Db_sanitize=address,undefined' || '-Dbuildtype=release' }} ${{ matrix.deps == 'system' && '--wrap-mode=nofallback' || '--force-fallback-for=poor_wayland_swapchain,vulkan_initializers,poor_wayland,wayland-protocols,poor_loop,liburing,poor_base' }}
     steps:
       - uses: actions/checkout@v5
       - name: Install dependencies
@@ -33,8 +33,9 @@ jobs:
         run: |
           git -c safe.directory='*' submodule update --init subprojects/poor_wayland subprojects/poor_wayland_swapchain subprojects/wayland-protocols
           git -c safe.directory='*' -C subprojects/poor_wayland submodule update --init subprojects/poor_loop
+          git -c safe.directory='*' -C subprojects/poor_wayland_swapchain submodule update --init subprojects/vulkan_initializers
           git -c safe.directory='*' -C subprojects/poor_wayland/subprojects/poor_loop submodule update --init subprojects/poor_base subprojects/liburing/liburing
-      - name: Install poor_base, poor_loop, poor_wayland, wayland-protocols and poor_wayland_swapchain
+      - name: Install poor_base, poor_loop, poor_wayland, wayland-protocols, vulkan_initializers and poor_wayland_swapchain
         if: matrix.deps == 'system'
         run: |
           meson setup /tmp/poor_base subprojects/poor_wayland/subprojects/poor_loop/subprojects/poor_base
@@ -45,6 +46,8 @@ jobs:
           meson install -C /tmp/poor_wayland
           meson setup /tmp/wayland-protocols subprojects/wayland-protocols -Dtests=false
           meson install -C /tmp/wayland-protocols
+          meson setup /tmp/vulkan_initializers subprojects/poor_wayland_swapchain/subprojects/vulkan_initializers
+          meson install -C /tmp/vulkan_initializers
           meson setup /tmp/poor_wayland_swapchain subprojects/poor_wayland_swapchain --wrap-mode=nofallback -Dtests=false
           meson install -C /tmp/poor_wayland_swapchain
           ldconfig
@@ -68,7 +71,7 @@ jobs:
         deps: [system, bundled]
     env:
       CC: clang-${{ matrix.version }}
-      MESON_ARGS: -Dwerror=true ${{ matrix.build == 'sanitizers' && '-Dbuildtype=debug -Db_sanitize=address,undefined -Db_lundef=false' || '-Dbuildtype=release' }} ${{ matrix.deps == 'system' && '--wrap-mode=nofallback' || '--force-fallback-for=poor_wayland_swapchain,poor_wayland,wayland-protocols,poor_loop,liburing,poor_base' }}
+      MESON_ARGS: -Dwerror=true ${{ matrix.build == 'sanitizers' && '-Dbuildtype=debug -Db_sanitize=address,undefined -Db_lundef=false' || '-Dbuildtype=release' }} ${{ matrix.deps == 'system' && '--wrap-mode=nofallback' || '--force-fallback-for=poor_wayland_swapchain,vulkan_initializers,poor_wayland,wayland-protocols,poor_loop,liburing,poor_base' }}
     steps:
       - uses: actions/checkout@v5
       - name: Install dependencies
@@ -80,8 +83,9 @@ jobs:
         run: |
           git submodule update --init subprojects/poor_wayland subprojects/poor_wayland_swapchain subprojects/wayland-protocols
           git -C subprojects/poor_wayland submodule update --init subprojects/poor_loop
+          git -C subprojects/poor_wayland_swapchain submodule update --init subprojects/vulkan_initializers
           git -C subprojects/poor_wayland/subprojects/poor_loop submodule update --init subprojects/poor_base subprojects/liburing/liburing
-      - name: Install poor_base, poor_loop, poor_wayland, wayland-protocols and poor_wayland_swapchain
+      - name: Install poor_base, poor_loop, poor_wayland, wayland-protocols, vulkan_initializers and poor_wayland_swapchain
         if: matrix.deps == 'system'
         run: |
           meson setup /tmp/poor_base subprojects/poor_wayland/subprojects/poor_loop/subprojects/poor_base
@@ -92,6 +96,8 @@ jobs:
           sudo meson install -C /tmp/poor_wayland
           meson setup /tmp/wayland-protocols subprojects/wayland-protocols -Dtests=false
           sudo meson install -C /tmp/wayland-protocols
+          meson setup /tmp/vulkan_initializers subprojects/poor_wayland_swapchain/subprojects/vulkan_initializers
+          sudo meson install -C /tmp/vulkan_initializers
           meson setup /tmp/poor_wayland_swapchain subprojects/poor_wayland_swapchain --wrap-mode=nofallback -Dtests=false
           sudo meson install -C /tmp/poor_wayland_swapchain
           sudo ldconfig

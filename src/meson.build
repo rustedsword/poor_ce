@@ -60,7 +60,7 @@ executable(
 	client_protocol_h,
 	protocol_c,
 	shaders_h,
-	dependencies: [ swapchain_dep, client_dep, poor_loop_dep, poor_base_dep, vulkan_dep, xkbcommon_dep, freetype_dep,
-			cc.find_library('m', required: false) ],
+	dependencies: [ swapchain_dep, client_dep, poor_loop_dep, poor_base_dep, vulkan_dep, vulkan_initializers_dep,
+			xkbcommon_dep, freetype_dep, cc.find_library('m', required: false) ],
 	install: true,
 )

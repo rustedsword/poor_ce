@@ -60,6 +60,7 @@ wayland_protocols_dep = dependency('wayland-protocols', version: '>= 1.49', fall
 	default_options: [ 'tests=false' ])
 protocols_dir = wayland_protocols_dep.get_variable('pkgdatadir')
 vulkan_dep = dependency('vulkan')
+vulkan_initializers_dep = dependency('vulkan_initializers')
 xkbcommon_dep = dependency('xkbcommon')
 freetype_dep = dependency('freetype2')
 glslang = find_program('glslangValidator', native: true)

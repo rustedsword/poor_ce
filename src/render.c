@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysmacros.h>
+#include <vk_init.h>
 
 #include "logger.h"
 #include "render.h"
@@ -49,7 +50,7 @@ static struct render_target *target_of(struct renderer *renderer, struct poor_wl
 
 static uint32_t memory_type(const struct renderer *renderer, uint32_t types, VkMemoryPropertyFlags flags)
 {
-	VkPhysicalDeviceMemoryProperties2 properties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 };
+	auto properties = xVkPhysicalDeviceMemoryProperties2();
 	const VkPhysicalDeviceMemoryProperties *memory = &properties.memoryProperties;
 
 	vkGetPhysicalDeviceMemoryProperties2(renderer->physical, &properties);
@@ -62,26 +63,17 @@ static uint32_t memory_type(const struct renderer *renderer, uint32_t types, VkM
 static bool buffer_init(struct renderer *renderer, VkDeviceSize size, VkBufferUsageFlags2 usage, VkBuffer *buffer,
 			VkDeviceMemory *memory, void **map)
 {
-	VkBufferUsageFlags2CreateInfo usage_info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO,
-		.usage = usage,
-	};
-	VkBufferCreateInfo info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.pNext = &usage_info,
+	auto info = xVkBufferCreateInfo(
+		.pNext = &xVkBufferUsageFlags2CreateInfo(.usage = usage),
 		.size = size,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
-	VkBufferMemoryRequirementsInfo2 requirements_info = { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2 };
-	VkMemoryRequirements2 requirements = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
-	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-	VkBindBufferMemoryInfo bind = { .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
-	VkMemoryMapInfo map_info = { .sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO, .size = VK_WHOLE_SIZE };
+	);
+	auto requirements = xVkMemoryRequirements2();
+	auto allocate = xVkMemoryAllocateInfo();
 
 	if (!check(vkCreateBuffer(renderer->device, &info, nullptr, buffer), "vkCreateBuffer"))
 		return false;
-	requirements_info.buffer = bind.buffer = *buffer;
-	vkGetBufferMemoryRequirements2(renderer->device, &requirements_info, &requirements);
+	vkGetBufferMemoryRequirements2(renderer->device, &xVkBufferMemoryRequirementsInfo2(.buffer = *buffer), &requirements);
 	allocate.allocationSize = requirements.memoryRequirements.size;
 	allocate.memoryTypeIndex = memory_type(renderer, requirements.memoryRequirements.memoryTypeBits,
 					       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -89,11 +81,11 @@ static bool buffer_init(struct renderer *renderer, VkDeviceSize size, VkBufferUs
 		log_printf("poor_text_viewer: no host visible memory\n");
 		return false;
 	}
-	if (!check(vkAllocateMemory(renderer->device, &allocate, nullptr, memory), "vkAllocateMemory"))
-		return false;
-	bind.memory = map_info.memory = *memory;
-	return check(vkBindBufferMemory2(renderer->device, 1, &bind), "vkBindBufferMemory2") &&
-	       check(vkMapMemory2(renderer->device, &map_info, map), "vkMapMemory2");
+	return check(vkAllocateMemory(renderer->device, &allocate, nullptr, memory), "vkAllocateMemory") &&
+	       check(vkBindBufferMemory2(renderer->device, 1, &xVkBindBufferMemoryInfo(.buffer = *buffer, .memory = *memory)),
+		     "vkBindBufferMemory2") &&
+	       check(vkMapMemory2(renderer->device, &xVkMemoryMapInfo(.memory = *memory, .size = VK_WHOLE_SIZE), map),
+		     "vkMapMemory2");
 }
 
 /* The last drawing is done by then, which Vulkan learns from the fence */
@@ -113,20 +105,18 @@ static void target_fini(struct renderer *renderer, struct render_target *target)
 
 static bool target_init(struct renderer *renderer, struct render_target *target, VkImage image)
 {
-	VkImageViewCreateInfo view_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+	auto view_info = xVkImageViewCreateInfo(
 		.image = image,
 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
 		.format = RENDER_FORMAT,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
-	};
-	VkCommandBufferAllocateInfo commands_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+	);
+	auto commands_info = xVkCommandBufferAllocateInfo(
 		.commandPool = renderer->pool,
 		.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 		.commandBufferCount = 1,
-	};
-	VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
+	);
+	auto fence_info = xVkFenceCreateInfo(.flags = VK_FENCE_CREATE_SIGNALED_BIT);
 
 	target->view = VK_NULL_HANDLE;
 	target->commands = VK_NULL_HANDLE;
@@ -181,10 +171,8 @@ static bool device_queue_family(VkPhysicalDevice physical, uint32_t *family)
 	VkQueueFamilyProperties2 families[16];
 	uint32_t count = ARRAY_SIZE(families);
 
-	foreach_array_ref(families, properties) {
-		properties->sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
-		properties->pNext = nullptr;
-	}
+	foreach_array_ref(families, properties)
+		*properties = xVkQueueFamilyProperties2();
 	vkGetPhysicalDeviceQueueFamilyProperties2(physical, &count, families);
 	foreach_array_index(arrview_first(count, families), i) {
 		if (families[i].queueFamilyProperties.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
@@ -197,11 +185,8 @@ static bool device_queue_family(VkPhysicalDevice physical, uint32_t *family)
 
 static bool device_exports_fences(VkPhysicalDevice physical)
 {
-	VkPhysicalDeviceExternalSemaphoreInfo info = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO,
-		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-	};
-	VkExternalSemaphoreProperties properties = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
+	auto info = xVkPhysicalDeviceExternalSemaphoreInfo(.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
+	auto properties = xVkExternalSemaphoreProperties();
 
 	vkGetPhysicalDeviceExternalSemaphoreProperties(physical, &info, &properties);
 	return properties.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT;
@@ -210,54 +195,13 @@ static bool device_exports_fences(VkPhysicalDevice physical)
 static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t device, uint32_t *render_minor)
 {
 	static const float priority = 1.0f;
-	VkApplicationInfo application = {
-		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-		.pApplicationName = "poor_text_viewer",
-		.apiVersion = VK_API_VERSION_1_4,
-	};
-	VkInstanceCreateInfo instance_info = {
-		.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-		.pApplicationInfo = &application,
-	};
-	VkPhysicalDeviceVulkan14Features features_14 = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-		.maintenance5 = VK_TRUE,
-		.pushDescriptor = VK_TRUE,
-	};
-	VkPhysicalDeviceVulkan13Features features_13 = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-		.pNext = &features_14,
-		.synchronization2 = VK_TRUE,
-		.dynamicRendering = VK_TRUE,
-	};
-	VkDeviceQueueCreateInfo queue_info = {
-		.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-		.queueCount = 1,
-		.pQueuePriorities = &priority,
-	};
-	VkDeviceQueueInfo2 queue = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2 };
-	VkDeviceCreateInfo device_info = {
-		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-		.pNext = &features_13,
-		.queueCreateInfoCount = 1,
-		.pQueueCreateInfos = &queue_info,
-		.enabledExtensionCount = ARRAY_SIZE(poor_wl_vulkan_device_extensions),
-		.ppEnabledExtensionNames = poor_wl_vulkan_device_extensions,
-	};
-	VkCommandPoolCreateInfo pool_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-		.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-	};
-	VkExportSemaphoreCreateInfo export = {
-		.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-		.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-	};
-	VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &export };
-	VkPhysicalDeviceProperties2 properties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+	auto application = xVkApplicationInfo(.pApplicationName = "poor_text_viewer", .apiVersion = VK_API_VERSION_1_4);
+	auto properties = xVkPhysicalDeviceProperties2();
 
 	/* Mesa's device-select layer would connect to the compositor with the system libwayland and block, to sort GPUs */
 	setenv("NODEVICE_SELECT", "1", 1);
-	if (!check(vkCreateInstance(&instance_info, nullptr, &renderer->instance), "vkCreateInstance"))
+	if (!check(vkCreateInstance(&xVkInstanceCreateInfo(.pApplicationInfo = &application), nullptr, &renderer->instance),
+		   "vkCreateInstance"))
 		return false;
 	renderer->physical = poor_wl_vulkan_find_device(vkGetInstanceProcAddr, renderer->instance, device, render_minor);
 	if (renderer->physical) {
@@ -270,10 +214,32 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 			   minor(device));
 		return false;
 	}
-	queue_info.queueFamilyIndex = queue.queueFamilyIndex = pool_info.queueFamilyIndex = renderer->family;
+	auto device_info = xVkDeviceCreateInfo(
+		.pNext = &xVkPhysicalDeviceVulkan13Features(
+			.pNext = &xVkPhysicalDeviceVulkan14Features(.maintenance5 = VK_TRUE, .pushDescriptor = VK_TRUE),
+			.synchronization2 = VK_TRUE,
+			.dynamicRendering = VK_TRUE,
+		),
+		.queueCreateInfoCount = 1,
+		.pQueueCreateInfos = &xVkDeviceQueueCreateInfo(
+			.queueFamilyIndex = renderer->family,
+			.queueCount = 1,
+			.pQueuePriorities = &priority,
+		),
+		.enabledExtensionCount = ARRAY_SIZE(poor_wl_vulkan_device_extensions),
+		.ppEnabledExtensionNames = poor_wl_vulkan_device_extensions,
+	);
+	auto pool_info = xVkCommandPoolCreateInfo(
+		.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+		.queueFamilyIndex = renderer->family,
+	);
+	auto semaphore_info = xVkSemaphoreCreateInfo(
+		.pNext = &xVkExportSemaphoreCreateInfo(.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT),
+	);
+
 	if (!check(vkCreateDevice(renderer->physical, &device_info, nullptr, &renderer->device), "vkCreateDevice"))
 		return false;
-	vkGetDeviceQueue2(renderer->device, &queue, &renderer->queue);
+	vkGetDeviceQueue2(renderer->device, &xVkDeviceQueueInfo2(.queueFamilyIndex = renderer->family), &renderer->queue);
 	renderer->get_semaphore_fd = (PFN_vkGetSemaphoreFdKHR)vkGetDeviceProcAddr(renderer->device, "vkGetSemaphoreFdKHR");
 	poor_wl_vulkan_init(&renderer->vulkan, loop, vkGetInstanceProcAddr, renderer->instance, renderer->physical,
 			    renderer->device, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
@@ -284,8 +250,7 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 /* The atlas stays in the general layout, the frames that add glyphs upload them before they draw */
 static bool atlas_image_init(struct renderer *renderer)
 {
-	VkImageCreateInfo image_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+	auto image_info = xVkImageCreateInfo(
 		.imageType = VK_IMAGE_TYPE_2D,
 		.format = VK_FORMAT_R8_UNORM,
 		.extent = { ATLAS_SIZE, ATLAS_SIZE, 1 },
@@ -296,23 +261,15 @@ static bool atlas_image_init(struct renderer *renderer)
 		.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-	};
-	VkImageViewCreateInfo view_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-		.viewType = VK_IMAGE_VIEW_TYPE_2D,
-		.format = VK_FORMAT_R8_UNORM,
-		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
-	};
-	VkImageMemoryRequirementsInfo2 requirements_info = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2 };
-	VkMemoryRequirements2 requirements = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2 };
-	VkMemoryAllocateInfo allocate = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-	VkBindImageMemoryInfo bind = { .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO };
+	);
+	auto requirements = xVkMemoryRequirements2();
+	auto allocate = xVkMemoryAllocateInfo();
 	uint32_t types;
 
 	if (!check(vkCreateImage(renderer->device, &image_info, nullptr, &renderer->atlas_image), "vkCreateImage"))
 		return false;
-	requirements_info.image = bind.image = view_info.image = renderer->atlas_image;
-	vkGetImageMemoryRequirements2(renderer->device, &requirements_info, &requirements);
+	vkGetImageMemoryRequirements2(renderer->device, &xVkImageMemoryRequirementsInfo2(.image = renderer->atlas_image),
+				      &requirements);
 	types = requirements.memoryRequirements.memoryTypeBits;
 	allocate.allocationSize = requirements.memoryRequirements.size;
 	allocate.memoryTypeIndex = memory_type(renderer, types, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -320,7 +277,14 @@ static bool atlas_image_init(struct renderer *renderer)
 		allocate.memoryTypeIndex = memory_type(renderer, types, 0);
 	if (!check(vkAllocateMemory(renderer->device, &allocate, nullptr, &renderer->atlas_memory), "vkAllocateMemory"))
 		return false;
-	bind.memory = renderer->atlas_memory;
+	auto bind = xVkBindImageMemoryInfo(.image = renderer->atlas_image, .memory = renderer->atlas_memory);
+	auto view_info = xVkImageViewCreateInfo(
+		.image = renderer->atlas_image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = VK_FORMAT_R8_UNORM,
+		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
+	);
+
 	return check(vkBindImageMemory2(renderer->device, 1, &bind), "vkBindImageMemory2") &&
 	       check(vkCreateImageView(renderer->device, &view_info, nullptr, &renderer->atlas_view), "vkCreateImageView");
 }
@@ -330,29 +294,17 @@ static bool pipeline_create(struct renderer *renderer)
 {
 	static const VkFormat format = RENDER_FORMAT;
 	static const VkDynamicState dynamic_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkShaderModuleCreateInfo vertex = {
-		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = ARRAY_SIZE_BYTES(text_vert),
-		.pCode = text_vert,
-	};
-	VkShaderModuleCreateInfo fragment = {
-		.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-		.codeSize = ARRAY_SIZE_BYTES(text_frag),
-		.pCode = text_frag,
-	};
 	VkPipelineShaderStageCreateInfo stages[] = {
-		{
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.pNext = &vertex,
+		xVkPipelineShaderStageCreateInfo(
+			.pNext = &xVkShaderModuleCreateInfo(.codeSize = ARRAY_SIZE_BYTES(text_vert), .pCode = text_vert),
 			.stage = VK_SHADER_STAGE_VERTEX_BIT,
 			.pName = "main",
-		},
-		{
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-			.pNext = &fragment,
+		),
+		xVkPipelineShaderStageCreateInfo(
+			.pNext = &xVkShaderModuleCreateInfo(.codeSize = ARRAY_SIZE_BYTES(text_frag), .pCode = text_frag),
 			.stage = VK_SHADER_STAGE_FRAGMENT_BIT,
 			.pName = "main",
-		},
+		),
 	};
 	VkVertexInputBindingDescription binding = {
 		.binding = 0,
@@ -363,33 +315,6 @@ static bool pipeline_create(struct renderer *renderer)
 		{ .location = 0, .format = VK_FORMAT_R16G16_SINT, .offset = offsetof(struct instance, x) },
 		{ .location = 1, .format = VK_FORMAT_R16G16_UINT, .offset = offsetof(struct instance, u) },
 		{ .location = 2, .format = VK_FORMAT_R8G8B8A8_UNORM, .offset = offsetof(struct instance, color) },
-	};
-	VkPipelineVertexInputStateCreateInfo vertex_input = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-		.vertexBindingDescriptionCount = 1,
-		.pVertexBindingDescriptions = &binding,
-		.vertexAttributeDescriptionCount = ARRAY_SIZE(attributes),
-		.pVertexAttributeDescriptions = attributes,
-	};
-	VkPipelineInputAssemblyStateCreateInfo assembly = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-	};
-	VkPipelineViewportStateCreateInfo viewport = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-		.viewportCount = 1,
-		.scissorCount = 1,
-	};
-	VkPipelineRasterizationStateCreateInfo rasterization = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-		.polygonMode = VK_POLYGON_MODE_FILL,
-		.cullMode = VK_CULL_MODE_NONE,
-		.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-		.lineWidth = 1.0f,
-	};
-	VkPipelineMultisampleStateCreateInfo multisample = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-		.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
 	};
 	VkPipelineColorBlendAttachmentState blend_attachment = {
 		.blendEnable = VK_TRUE,
@@ -402,35 +327,35 @@ static bool pipeline_create(struct renderer *renderer)
 		.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
 				  VK_COLOR_COMPONENT_A_BIT,
 	};
-	VkPipelineColorBlendStateCreateInfo blend = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-		.attachmentCount = 1,
-		.pAttachments = &blend_attachment,
-	};
-	VkPipelineDynamicStateCreateInfo dynamic = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-		.dynamicStateCount = ARRAY_SIZE(dynamic_states),
-		.pDynamicStates = dynamic_states,
-	};
-	VkPipelineRenderingCreateInfo rendering = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-		.colorAttachmentCount = 1,
-		.pColorAttachmentFormats = &format,
-	};
-	VkGraphicsPipelineCreateInfo info = {
-		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-		.pNext = &rendering,
+	auto info = xVkGraphicsPipelineCreateInfo(
+		.pNext = &xVkPipelineRenderingCreateInfo(.colorAttachmentCount = 1, .pColorAttachmentFormats = &format),
 		.stageCount = ARRAY_SIZE(stages),
 		.pStages = stages,
-		.pVertexInputState = &vertex_input,
-		.pInputAssemblyState = &assembly,
-		.pViewportState = &viewport,
-		.pRasterizationState = &rasterization,
-		.pMultisampleState = &multisample,
-		.pColorBlendState = &blend,
-		.pDynamicState = &dynamic,
+		.pVertexInputState = &xVkPipelineVertexInputStateCreateInfo(
+			.vertexBindingDescriptionCount = 1,
+			.pVertexBindingDescriptions = &binding,
+			.vertexAttributeDescriptionCount = ARRAY_SIZE(attributes),
+			.pVertexAttributeDescriptions = attributes,
+		),
+		.pInputAssemblyState = &xVkPipelineInputAssemblyStateCreateInfo(.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP),
+		.pViewportState = &xVkPipelineViewportStateCreateInfo(.viewportCount = 1, .scissorCount = 1),
+		.pRasterizationState = &xVkPipelineRasterizationStateCreateInfo(
+			.polygonMode = VK_POLYGON_MODE_FILL,
+			.cullMode = VK_CULL_MODE_NONE,
+			.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+			.lineWidth = 1.0f,
+		),
+		.pMultisampleState = &xVkPipelineMultisampleStateCreateInfo(.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT),
+		.pColorBlendState = &xVkPipelineColorBlendStateCreateInfo(
+			.attachmentCount = 1,
+			.pAttachments = &blend_attachment,
+		),
+		.pDynamicState = &xVkPipelineDynamicStateCreateInfo(
+			.dynamicStateCount = ARRAY_SIZE(dynamic_states),
+			.pDynamicStates = dynamic_states,
+		),
 		.layout = renderer->layout,
-	};
+	);
 
 	return check(vkCreateGraphicsPipelines(renderer->device, VK_NULL_HANDLE, 1, &info, nullptr, &renderer->pipeline),
 		     "vkCreateGraphicsPipelines");
@@ -439,15 +364,14 @@ static bool pipeline_create(struct renderer *renderer)
 /* The atlas is sampled at the centers of its texels, so that glyphs show as they were drawn */
 static bool pipeline_init(struct renderer *renderer)
 {
-	VkSamplerCreateInfo sampler_info = {
-		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+	auto sampler_info = xVkSamplerCreateInfo(
 		.magFilter = VK_FILTER_NEAREST,
 		.minFilter = VK_FILTER_NEAREST,
 		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
 		.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 		.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
 		.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-	};
+	);
 	VkDescriptorSetLayoutBinding binding = {
 		.binding = 0,
 		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -455,23 +379,21 @@ static bool pipeline_init(struct renderer *renderer)
 		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 		.pImmutableSamplers = &renderer->sampler,
 	};
-	VkDescriptorSetLayoutCreateInfo set_layout_info = {
-		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+	auto set_layout_info = xVkDescriptorSetLayoutCreateInfo(
 		.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT,
 		.bindingCount = 1,
 		.pBindings = &binding,
-	};
+	);
 	VkPushConstantRange push = {
 		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
 		.size = sizeof(struct push_constants),
 	};
-	VkPipelineLayoutCreateInfo layout_info = {
-		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+	auto layout_info = xVkPipelineLayoutCreateInfo(
 		.setLayoutCount = 1,
 		.pSetLayouts = &renderer->set_layout,
 		.pushConstantRangeCount = 1,
 		.pPushConstantRanges = &push,
-	};
+	);
 
 	return check(vkCreateSampler(renderer->device, &sampler_info, nullptr, &renderer->sampler), "vkCreateSampler") &&
 	       check(vkCreateDescriptorSetLayout(renderer->device, &set_layout_info, nullptr, &renderer->set_layout),
@@ -608,13 +530,7 @@ static size_t build_selection(struct renderer *renderer, const struct view *view
 
 static void image_barrier(VkCommandBuffer commands, const VkImageMemoryBarrier2 *barrier)
 {
-	VkDependencyInfo dependency = {
-		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-		.imageMemoryBarrierCount = 1,
-		.pImageMemoryBarriers = barrier,
-	};
-
-	vkCmdPipelineBarrier2(commands, &dependency);
+	vkCmdPipelineBarrier2(commands, &xVkDependencyInfo(.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = barrier));
 }
 
 /* The rows that changed since the last upload go through the staging buffer of the target */
@@ -623,8 +539,7 @@ static void upload_atlas(struct renderer *renderer, struct render_target *target
 	struct atlas *atlas = renderer->atlas;
 	auto staging = (uint8_t (*)[ATLAS_SIZE][ATLAS_SIZE])target->staging_map;
 	size_t rows = atlas->dirty_bottom - atlas->dirty_top;
-	VkImageMemoryBarrier2 barrier = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	auto barrier = xVkImageMemoryBarrier2(
 		.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
 		.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
 		.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -634,21 +549,18 @@ static void upload_atlas(struct renderer *renderer, struct render_target *target
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.image = renderer->atlas_image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
-	};
-	VkBufferImageCopy2 region = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
-		.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
-		.imageOffset = { 0, atlas->dirty_top, 0 },
-		.imageExtent = { ATLAS_SIZE, rows, 1 },
-	};
-	VkCopyBufferToImageInfo2 copy = {
-		.sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
+	);
+	auto copy = xVkCopyBufferToImageInfo2(
 		.srcBuffer = target->staging,
 		.dstImage = renderer->atlas_image,
 		.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL,
 		.regionCount = 1,
-		.pRegions = &region,
-	};
+		.pRegions = &xVkBufferImageCopy2(
+			.imageSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .layerCount = 1 },
+			.imageOffset = { 0, atlas->dirty_top, 0 },
+			.imageExtent = { ATLAS_SIZE, rows, 1 },
+		),
+	);
 
 	copy_array(arrview_first(rows, staging), arrview(atlas->dirty_top, rows, atlas->pixels));
 	image_barrier(target->commands, &barrier);
@@ -669,33 +581,29 @@ static void draw_glyphs(struct renderer *renderer, struct render_target *target,
 	VkRect2D scissor = { .extent = { view->width, view->height } };
 	VkDeviceSize offset = 0;
 	VkDescriptorImageInfo atlas = { .imageView = renderer->atlas_view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
-	VkWriteDescriptorSet write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstBinding = 0,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		.pImageInfo = &atlas,
-	};
-	VkPushDescriptorSetInfo descriptors = {
-		.sType = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_INFO,
+	auto descriptors = xVkPushDescriptorSetInfo(
 		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
 		.layout = renderer->layout,
 		.set = 0,
 		.descriptorWriteCount = 1,
-		.pDescriptorWrites = &write,
-	};
+		.pDescriptorWrites = &xVkWriteDescriptorSet(
+			.dstBinding = 0,
+			.descriptorCount = 1,
+			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			.pImageInfo = &atlas,
+		),
+	);
 	struct push_constants constants = {
 		.viewport = { view->width, view->height },
 		.cell = { view->cell_width, view->cell_height },
 		.atlas = { ATLAS_SIZE, ATLAS_SIZE },
 	};
-	VkPushConstantsInfo push = {
-		.sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO,
+	auto push = xVkPushConstantsInfo(
 		.layout = renderer->layout,
 		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
 		.size = sizeof(constants),
 		.pValues = &constants,
-	};
+	);
 
 	vkCmdBindPipeline(target->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipeline);
 	vkCmdPushDescriptorSet2(target->commands, &descriptors);
@@ -715,12 +623,8 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 {
 	struct render_target *target = target_of(renderer, buffer);
 	VkImage image = ((struct poor_wl_vulkan_image *)buffer->data)->image;
-	VkCommandBufferBeginInfo begin = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-	};
-	VkImageMemoryBarrier2 draw = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	auto begin = xVkCommandBufferBeginInfo(.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+	auto draw = xVkImageMemoryBarrier2(
 		.srcStageMask = VK_PIPELINE_STAGE_2_NONE,
 		.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -730,9 +634,8 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
 		.image = image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
-	};
-	VkImageMemoryBarrier2 release = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+	);
+	auto release = xVkImageMemoryBarrier2(
 		.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 		.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
 		.dstStageMask = VK_PIPELINE_STAGE_2_NONE,
@@ -742,47 +645,36 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
 		.image = image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
-	};
-	VkRenderingAttachmentInfo attachment = {
-		.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-		.imageView = target->view,
-		.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-		.clearValue = { .color = BACKGROUND },
-	};
-	VkRenderingInfo rendering = {
-		.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+	);
+	auto rendering = xVkRenderingInfo(
 		.renderArea = { .extent = { (uint32_t)buffer->width, (uint32_t)buffer->height } },
 		.layerCount = 1,
 		.colorAttachmentCount = 1,
-		.pColorAttachments = &attachment,
-	};
+		.pColorAttachments = &xVkRenderingAttachmentInfo(
+			.imageView = target->view,
+			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+			.clearValue = { .color = BACKGROUND },
+		),
+	);
 	VkClearAttachment selection = {
 		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 		.clearValue = { .color = view->focused ? SELECTION : SELECTION_INACTIVE },
 	};
-	VkCommandBufferSubmitInfo command_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-		.commandBuffer = target->commands,
-	};
-	VkSemaphoreSubmitInfo signal = {
-		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-		.semaphore = renderer->rendered,
-		.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-	};
-	VkSubmitInfo2 submit = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+	auto submit = xVkSubmitInfo2(
 		.commandBufferInfoCount = 1,
-		.pCommandBufferInfos = &command_info,
+		.pCommandBufferInfos = &xVkCommandBufferSubmitInfo(.commandBuffer = target->commands),
 		.signalSemaphoreInfoCount = 1,
-		.pSignalSemaphoreInfos = &signal,
-	};
-	VkSemaphoreGetFdInfoKHR get = {
-		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+		.pSignalSemaphoreInfos = &xVkSemaphoreSubmitInfo(
+			.semaphore = renderer->rendered,
+			.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		),
+	);
+	auto get = xVkSemaphoreGetFdInfoKHR(
 		.semaphore = renderer->rendered,
 		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-	};
+	);
 	size_t start, end, glyphs, rects;
 	int fence;
 
@@ -818,31 +710,26 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 /* An empty batch signals once all drawing before it is done, -1 means that it is or that the fence failed */
 int renderer_idle_fence(struct renderer *renderer)
 {
-	VkExportSemaphoreCreateInfo export = {
-		.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
-		.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-	};
-	VkSemaphoreCreateInfo info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &export };
-	VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-	VkSemaphoreSubmitInfo signal = {
-		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-		.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-	};
-	VkSubmitInfo2 submit = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-		.signalSemaphoreInfoCount = 1,
-		.pSignalSemaphoreInfos = &signal,
-	};
-	VkSemaphoreGetFdInfoKHR get = {
-		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
-		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
-	};
+	auto info = xVkSemaphoreCreateInfo(
+		.pNext = &xVkExportSemaphoreCreateInfo(.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT),
+	);
 	int fd = -1;
 
 	if (!renderer->queue || !check(vkCreateSemaphore(renderer->device, &info, nullptr, &renderer->idle), "vkCreateSemaphore") ||
-	    !check(vkCreateFence(renderer->device, &fence_info, nullptr, &renderer->drained), "vkCreateFence"))
+	    !check(vkCreateFence(renderer->device, &xVkFenceCreateInfo(), nullptr, &renderer->drained), "vkCreateFence"))
 		return -1;
-	signal.semaphore = get.semaphore = renderer->idle;
+	auto submit = xVkSubmitInfo2(
+		.signalSemaphoreInfoCount = 1,
+		.pSignalSemaphoreInfos = &xVkSemaphoreSubmitInfo(
+			.semaphore = renderer->idle,
+			.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+		),
+	);
+	auto get = xVkSemaphoreGetFdInfoKHR(
+		.semaphore = renderer->idle,
+		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+	);
+
 	if (!check(vkQueueSubmit2(renderer->queue, 1, &submit, renderer->drained), "vkQueueSubmit2"))
 		return -1;
 	check(renderer->get_semaphore_fd(renderer->device, &get, &fd), "vkGetSemaphoreFdKHR");
