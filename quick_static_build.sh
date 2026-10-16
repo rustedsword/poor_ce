@@ -1,0 +1,1 @@
+meson setup --wipe build-release --buildtype=release -Db_lto=true -Db_ndebug=if-release -Dtests=false -Ddefault_library=static --force-fallback-for=poor_loop,poor_base,liburing && ninja -C build-release
