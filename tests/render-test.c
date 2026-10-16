@@ -150,7 +150,7 @@ static void read_image(struct renderer *renderer, VkImage image, uint32_t width,
 /*
  * The image of a buffer that a swapchain would present. "b c" is selected, so its cells are blue and its letters
  * white, while "a" is dark on white. Without a GPU, as in CI, there is nothing to draw with. The validation layer
- * keeps its log open.
+ * keeps its log open from the creation of the instance, also when there is no device.
  */
 TEST(render_selection)
 {
@@ -166,20 +166,22 @@ TEST(render_selection)
 	struct font font;
 	struct text text;
 	struct view view;
+	bool ready;
 
 	loop_init(&loop);
 	log_init(&loop, "render-test");
 	assert(font_init(&font, 15));
 	atlas_init(&atlas, &font);
-	if (!renderer_init(&renderer, &loop, &atlas, makedev(226, 128), &minor)) {
+	DISABLE_LEAK_CHECKS;
+	ready = renderer_init(&renderer, &loop, &atlas, makedev(226, 128), &minor);
+	keep_loaded();
+	if (!ready) {
 		renderer_fini(&renderer);
 		font_fini(&font);
 		run_until(&loop, !log_pending());
 		loop_fini(&loop);
 		return;
 	}
-	keep_loaded();
-	DISABLE_LEAK_CHECKS;
 	renderer.vulkan.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	buffer->swapchain = &swapchain;
 	buffer->width = 200;
