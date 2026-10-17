@@ -10,3 +10,6 @@
 [submodule "refs/Vulkan-Docs"]
 	path = refs/Vulkan-Docs
 	url = https://github.com/KhronosGroup/Vulkan-Docs
+[submodule "refs/language-server-protocol"]
+	path = refs/language-server-protocol
+	url = https://github.com/microsoft/language-server-protocol
