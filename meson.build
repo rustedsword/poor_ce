@@ -1,7 +1,8 @@
 project(
 	'poor_ce', 'c',
 	version: '0.1.0',
-	license: 'MIT',
+	license: 'MIT AND OFL-1.1',
+	license_files: ['LICENSE', 'data/OFL.txt'],
 	meson_version: '>= 1.4.0',
 	default_options: [
 		'warning_level=2',
