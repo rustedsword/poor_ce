@@ -5,13 +5,19 @@
 #include <drm/drm_fourcc.h>
 #include <poll.h>
 #include <poor_poll.h>
+#include <poor_stdio.h>
+#include <poor_unistd.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <vk_init.h>
 
+#include "editor.h"
 #include "keep-loaded.h"
 #include "logger.h"
 #include "render.h"
+#include "scene.h"
 #include "test-loop.h"
 #include "test-runner.h"
 
@@ -29,14 +35,12 @@ static bool near(uint32_t pixel, uint32_t color)
 	return true;
 }
 
-/* Whether some pixel of the cell at 'column' of the first row passes 'test' */
-static bool cell_has(size_t height, size_t width, const uint32_t (*pixels)[height][width], const struct view *view, size_t column,
-		     bool (*test)(uint32_t))
+/* Whether some pixel of the cell at 'x', 'y' of 'width' x 'height' pixels passes 'test' */
+static bool cell_has(size_t height, size_t width, const uint32_t (*pixels)[height][width], int32_t x, int32_t y,
+		     const struct font *font, bool (*test)(uint32_t))
 {
-	auto rows = arrview(view->padding, view->cell_height, pixels);
-
-	foreach_array_const_ref(rows, row)
-		foreach_array_const_ref(arrview(view->padding + column * view->cell_width, view->cell_width, row), pixel)
+	foreach_array_const_ref(arrview(y, font->cell_height, pixels), row)
+		foreach_array_const_ref(arrview(x, font->cell_width, row), pixel)
 			if (test(*pixel))
 				return true;
 	return false;
@@ -154,73 +158,226 @@ static void read_image(struct renderer *renderer, VkImage image, uint32_t width,
 	vkFreeCommandBuffers(renderer->device, renderer->pool, 1, &commands);
 }
 
-/*
- * The image of a buffer that a swapchain would present. "b c" is selected, so its cells are blue and its letters
- * white, while "a" is dark on white. Without a GPU, as in CI, there is nothing to draw with. The validation layer
- * keeps its log open from the creation of the instance, also when there is no device.
- */
-TEST(render_selection)
-{
-	static struct renderer renderer;
-	static struct atlas atlas;
-	static struct poor_wl_swapchain swapchain;
-	static const char contents[] = "ab cd\nsecond";
-	struct poor_wl_swapchain_buffer *buffer = &swapchain.buffers[0];
-	struct pollfd fence = { .events = POLLIN };
+/* A renderer with a buffer that a swapchain would present, and host memory that its image is copied to */
+struct target {
+	struct renderer renderer;
+	struct poor_wl_swapchain swapchain;
 	struct readback readback;
-	uint32_t lines[4], minor;
-	struct poor_loop loop;
 	struct font font;
-	struct text text;
-	struct view view;
+	struct atlas atlas;
+	struct quad quads[RENDER_QUADS];
+};
+
+/* Without a GPU, as in CI, there is nothing to draw with. The validation layer keeps its log open from the creation of
+ * the instance, also when there is no device. */
+static bool target_init(struct target *target, struct poor_loop *loop, uint32_t width, uint32_t height)
+{
+	struct poor_wl_swapchain_buffer *buffer = &target->swapchain.buffers[0];
+	uint32_t minor;
 	bool ready;
 
-	loop_init(&loop);
-	log_init(&loop, "render-test");
-	assert(font_init(&font, 15));
-	atlas_init(&atlas, &font);
+	loop_init(loop);
+	log_init(loop, "render-test");
+	assert(font_init(&target->font, 15));
+	atlas_init(&target->atlas, &target->font);
 	DISABLE_LEAK_CHECKS;
-	ready = renderer_init(&renderer, &loop, &atlas, makedev(226, 128), &minor);
+	ready = renderer_init(&target->renderer, loop, &target->atlas, makedev(226, 128), &minor);
 	keep_loaded();
 	if (!ready) {
-		renderer_fini(&renderer);
-		font_fini(&font);
-		run_until(&loop, !log_pending());
-		loop_fini(&loop);
-		return;
+		renderer_fini(&target->renderer);
+		font_fini(&target->font);
+		run_until(loop, !log_pending());
+		loop_fini(loop);
+		return false;
 	}
-	renderer.vulkan.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-	buffer->swapchain = &swapchain;
-	buffer->width = 200;
-	buffer->height = 100;
-	assert(!renderer_allocator.allocate(&renderer, buffer, RENDER_DRM_FORMAT, ARRAY_SIZE(LINEAR), &LINEAR, false));
+	target->renderer.vulkan.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	buffer->swapchain = &target->swapchain;
+	buffer->width = width;
+	buffer->height = height;
+	assert(!renderer_allocator.allocate(&target->renderer, buffer, RENDER_DRM_FORMAT, ARRAY_SIZE(LINEAR), &LINEAR, false));
 	assert(buffer->modifier == DRM_FORMAT_MOD_LINEAR && buffer->plane_count == 1);
-	readback_init(&readback, &renderer, buffer->width * buffer->height * 4);
-	text_init(&text, arrview_str(contents), lines);
-	view_init(&view, &text);
-	view_resize(&view, buffer->width, buffer->height, font.cell_width, font.cell_height, 4);
-	view.focused = true;
-	view_select(&view, 4, 1);
-	fence.fd = renderer_draw(&renderer, buffer, &view);
+	readback_init(&target->readback, &target->renderer, width * height * 4);
+	return true;
+}
+
+static void target_draw(struct target *target, struct poor_loop *loop, uint32_t background, size_t count)
+{
+	struct poor_wl_swapchain_buffer *buffer = &target->swapchain.buffers[0];
+	struct pollfd fence = { .events = POLLIN };
+
+	fence.fd = renderer_draw(&target->renderer, buffer, background, arrview_first(count, target->quads));
 	assert(fence.fd >= 0 && poll_array(array_ptr(&fence), 5000) == 1);
-	poor_loop_close_fd_or_submit(&loop, fence.fd, 0);
+	poor_loop_close_fd_or_submit(loop, fence.fd, 0);
+	read_image(&target->renderer, ((struct poor_wl_vulkan_image *)buffer->data)->image, buffer->width, buffer->height,
+		   &target->readback);
+}
 
-	read_image(&renderer, ((struct poor_wl_vulkan_image *)buffer->data)->image, buffer->width, buffer->height, &readback);
+static void target_fini(struct target *target, struct poor_loop *loop)
+{
+	struct poor_wl_swapchain_buffer *buffer = &target->swapchain.buffers[0];
 
-	auto pixels = (const uint32_t (*)[buffer->height][buffer->width])readback.map;
-	assert(white((*pixels)[buffer->height - 1][buffer->width - 1]));
-	assert(near((*pixels)[view.padding + view.cell_height / 2][view.padding + view.cell_width * 2 + view.cell_width / 2],
-		    0x3373d6));
-	assert(cell_has(buffer->height, buffer->width, pixels, &view, 0, dark));
-	assert(!cell_has(buffer->height, buffer->width, pixels, &view, 1, dark) &&
-	       cell_has(buffer->height, buffer->width, pixels, &view, 1, white));
-	assert(!cell_has(buffer->height, buffer->width, pixels, &view, 2, white));
-	assert(cell_has(buffer->height, buffer->width, pixels, &view, 4, dark));
-	readback_fini(&readback, &renderer);
-	poor_loop_close_fd_or_submit(&loop, buffer->planes[0].fd, 0);
-	renderer_allocator.free(&renderer, buffer);
-	renderer_fini(&renderer);
-	font_fini(&font);
-	run_until(&loop, !log_pending());
-	loop_fini(&loop);
+	readback_fini(&target->readback, &target->renderer);
+	poor_loop_close_fd_or_submit(loop, buffer->planes[0].fd, 0);
+	renderer_allocator.free(&target->renderer, buffer);
+	renderer_fini(&target->renderer);
+	font_fini(&target->font);
+	run_until(loop, !log_pending());
+	loop_fini(loop);
+}
+
+/* SNAPSHOT names a PPM file that gets the image, to look at it */
+static void snapshot(size_t height, size_t width, const uint32_t (*pixels)[height][width])
+{
+	const char *path = getenv("SNAPSHOT");
+	FILE *file;
+
+	if (!path)
+		return;
+	assert((file = fopen(path, "wb")));
+	fprintf(file, "P6\n%zu %zu\n255\n", width, height);
+	foreach_array_const_ref(pixels, row)
+		foreach_array_const_ref(row, pixel)
+			fwrite_array(((const uint8_t[]){ *pixel >> 16 & 0xff, *pixel >> 8 & 0xff, *pixel & 0xff }), file);
+	fclose(file);
+}
+
+/* A blue quad over white, and a dark glyph that covers a cell partly */
+/* A first frame of solid quads only uses the atlas too, which has nothing yet */
+TEST(render_solid_quads)
+{
+	static struct target target;
+	struct poor_loop loop;
+
+	if (!target_init(&target, &loop, 200, 100))
+		return;
+	target.quads[0] = (struct quad){ .x = 20, .y = 10, .width = 30, .height = 40, .u = QUAD_SOLID, .v = 0,
+					 .color = QUAD_RGB(0x3373d6) };
+	target_draw(&target, &loop, QUAD_RGB(0xffffff), 1);
+
+	auto pixels = (const uint32_t (*)[100][200])target.readback.map;
+	assert(white((*pixels)[99][199]) && near((*pixels)[10][20], 0x3373d6) && near((*pixels)[49][49], 0x3373d6));
+	target_fini(&target, &loop);
+}
+
+TEST(render_quads)
+{
+	static struct target target;
+	struct poor_loop loop;
+	uint16_t u, v;
+
+	if (!target_init(&target, &loop, 200, 100))
+		return;
+	assert(atlas_find(&target.atlas, 'a', &u, &v));
+	target.quads[0] = (struct quad){ .x = 20, .y = 10, .width = 30, .height = 40, .u = QUAD_SOLID, .v = 0,
+					 .color = QUAD_RGB(0x3373d6) };
+	target.quads[1] = (struct quad){ .x = 100, .y = 10, .width = target.font.cell_width, .height = target.font.cell_height,
+					 .u = u, .v = v, .color = QUAD_RGB(0x1e1e1e) };
+	target_draw(&target, &loop, QUAD_RGB(0xffffff), 2);
+
+	auto pixels = (const uint32_t (*)[100][200])target.readback.map;
+	assert(white((*pixels)[99][199]) && white((*pixels)[9][20]) && white((*pixels)[10][50]));
+	assert(near((*pixels)[10][20], 0x3373d6) && near((*pixels)[49][49], 0x3373d6));
+	assert(cell_has(100, 200, pixels, 100, 10, &target.font, dark) && cell_has(100, 200, pixels, 100, 10, &target.font, white));
+	target_fini(&target, &loop);
+}
+
+static void changed(struct editor *)
+{
+}
+
+static void title(struct editor *, const char *)
+{
+}
+
+static bool copy(struct editor *, bool, size_t size, const char (*)[size])
+{
+	return true;
+}
+
+static bool paste(struct editor *, bool)
+{
+	return false;
+}
+
+static void cursor(struct editor *, uint32_t)
+{
+}
+
+static void quit(struct editor *)
+{
+}
+
+static const struct editor_listener editor_listener = {
+	.changed = changed,
+	.title = title,
+	.copy = copy,
+	.paste = paste,
+	.cursor = cursor,
+	.quit = quit,
+};
+
+static void write_file(const char *directory, const char *name, const char *contents)
+{
+	char path[PATH_MAX];
+	int fd;
+
+	snprintf_array(path, "%s/%s", directory, name);
+	assert((fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)) >= 0);
+	assert(write_array(fd, array_ptr(contents, strlen(contents))) == (ssize_t)strlen(contents));
+	close(fd);
+}
+
+static bool teal(uint32_t pixel)
+{
+	return (pixel & 0xff) > (pixel >> 16 & 0xff) + 0x30;
+}
+
+/*
+ * The editor with the tree of a directory and a C file in a tab: the panels are gray, the caret is black at the start
+ * of the line it stands out on, and types are teal.
+ */
+TEST(render_editor)
+{
+	static struct target target;
+	static struct editor editor;
+	static struct editor_memory memory;
+	static const char source[] = "int x;\n/* comment */\nstatic char *name = \"text\";\n";
+	char root[] = "/tmp/render-test-XXXXXX", path[PATH_MAX], directory[PATH_MAX];
+	const struct editor_tab *tab;
+	struct poor_loop loop;
+	int32_t x, y;
+
+	if (!target_init(&target, &loop, 640, 320))
+		return;
+	assert(mkdtemp(root));
+	write_file(root, "sample.c", source);
+	snprintf_array(directory, "%s/include", root);
+	assert(!mkdir(directory, 0755));
+	write_file(directory, "sample.h", "#pragma once\n");
+	snprintf_array(path, "%s/sample.c", root);
+	editor_init(&editor, &loop, &editor_listener, &memory);
+	editor_start(&editor, root, nullptr);
+	editor_resize(&editor, 640, 320, target.font.cell_width, target.font.cell_height, 4, 120);
+	editor_focus(&editor, true);
+	editor_open(&editor, path);
+	run_until(&loop, (tab = editor_tab(&editor)) && !tab->loading && editor.tree.nodes[0].loaded);
+	editor_layout(&editor);
+	target_draw(&target, &loop, SCENE_BACKGROUND, scene_build(&editor, &target.atlas, target.quads));
+
+	auto pixels = (const uint32_t (*)[320][640])target.readback.map;
+	snapshot(320, 640, pixels);
+	x = editor.text_rect.x + editor.padding;
+	y = editor.text_rect.y + editor.padding;
+	assert(near((*pixels)[300 - 2 * target.font.cell_height][2], 0xf3f3f3) && near((*pixels)[318][638], 0xf3f3f3));
+	assert(near((*pixels)[y + target.font.cell_height / 2][x], 0x000000));
+	assert(near((*pixels)[y + target.font.cell_height / 2][630], 0xf2f2f2));
+	assert(cell_has(320, 640, pixels, x + target.font.cell_width, y, &target.font, teal));
+	editor_stop(&editor);
+	run_until(&loop, !editor_busy(&editor));
+	unlink(path);
+	snprintf_array(path, "%s/include/sample.h", root);
+	unlink(path);
+	rmdir(directory);
+	rmdir(root);
+	target_fini(&target, &loop);
 }

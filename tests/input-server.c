@@ -65,14 +65,15 @@ static struct {
 	struct poor_wl_keyboard_resource keyboard;
 	struct poor_wl_data_device_manager_resource data_manager;
 	struct poor_wl_data_device_resource data_device;
-	struct poor_wl_data_offer_resource offer;
+	struct poor_wl_data_offer_resource offers[2];
 	struct poor_zwp_primary_selection_device_manager_v1_resource primary_manager;
 	struct poor_zwp_primary_selection_device_v1_resource primary_device;
-	struct poor_zwp_primary_selection_offer_v1_resource primary_offer;
+	struct poor_zwp_primary_selection_offer_v1_resource primary_offers[2];
 	struct poor_wp_cursor_shape_manager_v1_resource shape_manager;
 	struct poor_wp_cursor_shape_device_v1_resource shape_device;
 	struct source sources[8];
 	struct source *selection, *primary;
+	unsigned offer_count[2];
 	struct {
 		alignas(max_align_t) char bytes[1024];
 		bool used;
@@ -451,9 +452,18 @@ static void bind_shape_manager(struct poor_wl_client *client, void *, uint32_t v
 								     ignore_destroy);
 }
 
+/* The text is small enough for an empty pipe */
+static void offer_send(int32_t fd)
+{
+	input_server.offers_received++;
+	assert(write_array(fd, array_ptr(input_server.offer_text, strlen(input_server.offer_text))) ==
+	       (ssize_t)strlen(input_server.offer_text));
+	poor_loop_close_fd_or_submit(server.loop, fd, 0);
+}
+
 static void offer_receive(struct poor_wl_client *, struct poor_wl_data_offer_resource *, const char *, int32_t fd)
 {
-	poor_loop_close_fd_or_submit(server.loop, fd, 0);
+	offer_send(fd);
 }
 
 static void offer_destroy_request(struct poor_wl_client *, struct poor_wl_data_offer_resource *resource)
@@ -469,7 +479,7 @@ static const struct poor_wl_data_offer_interface offer_impl = {
 static void primary_offer_receive(struct poor_wl_client *, struct poor_zwp_primary_selection_offer_v1_resource *, const char *,
 				  int32_t fd)
 {
-	poor_loop_close_fd_or_submit(server.loop, fd, 0);
+	offer_send(fd);
 }
 
 static void primary_offer_destroy_request(struct poor_wl_client *, struct poor_zwp_primary_selection_offer_v1_resource *resource)
@@ -487,25 +497,31 @@ static void offer_destroy(struct poor_wl_resource *)
 	input_server.offers_destroyed++;
 }
 
+/* The client keeps the offer of a selection until the next one comes, so two offers take turns */
 void input_server_offer(bool primary)
 {
-	assert(input_server.offers == input_server.offers_destroyed);
-	input_server.offers++;
+	unsigned slot = server.offer_count[primary]++ % 2;
+
+	assert(++input_server.offers - input_server.offers_destroyed <= 3);
 	if (primary) {
-		assert(!poor_zwp_primary_selection_offer_v1_resource_init(&server.primary_offer, &server.client, 1, 0));
-		poor_zwp_primary_selection_offer_v1_resource_set_implementation(&server.primary_offer, &primary_offer_impl, nullptr,
-										 offer_destroy);
-		poor_zwp_primary_selection_device_v1_send_data_offer(&server.primary_device, &server.primary_offer);
-		poor_zwp_primary_selection_offer_v1_send_offer(&server.primary_offer, "text/plain");
-		poor_zwp_primary_selection_device_v1_send_selection(&server.primary_device, &server.primary_offer);
+		struct poor_zwp_primary_selection_offer_v1_resource *offer = &server.primary_offers[slot];
+
+		assert(!poor_zwp_primary_selection_offer_v1_resource_init(offer, &server.client, 1, 0));
+		poor_zwp_primary_selection_offer_v1_resource_set_implementation(offer, &primary_offer_impl, nullptr, offer_destroy);
+		poor_zwp_primary_selection_device_v1_send_data_offer(&server.primary_device, offer);
+		poor_zwp_primary_selection_offer_v1_send_offer(offer, "image/png");
+		poor_zwp_primary_selection_offer_v1_send_offer(offer, "text/plain");
+		poor_zwp_primary_selection_device_v1_send_selection(&server.primary_device, offer);
 		return;
 	}
-	assert(!poor_wl_data_offer_resource_init(&server.offer, &server.client,
-						 poor_wl_resource_get_version(&server.data_device.resource), 0));
-	poor_wl_data_offer_resource_set_implementation(&server.offer, &offer_impl, nullptr, offer_destroy);
-	poor_wl_data_device_send_data_offer(&server.data_device, &server.offer);
-	poor_wl_data_offer_send_offer(&server.offer, "text/plain");
-	poor_wl_data_device_send_selection(&server.data_device, &server.offer);
+	struct poor_wl_data_offer_resource *offer = &server.offers[slot];
+
+	assert(!poor_wl_data_offer_resource_init(offer, &server.client, poor_wl_resource_get_version(&server.data_device.resource), 0));
+	poor_wl_data_offer_resource_set_implementation(offer, &offer_impl, nullptr, offer_destroy);
+	poor_wl_data_device_send_data_offer(&server.data_device, offer);
+	poor_wl_data_offer_send_offer(offer, "text/plain");
+	poor_wl_data_offer_send_offer(offer, "text/plain;charset=utf-8");
+	poor_wl_data_device_send_selection(&server.data_device, offer);
 }
 
 int input_server_receive(bool primary, const char *mime)
@@ -527,6 +543,12 @@ uint32_t input_server_pointer_enter(double x, double y)
 	poor_wl_pointer_send_enter(&server.pointer, serial, &server.surface, poor_wl_fixed_from_double(x), poor_wl_fixed_from_double(y));
 	poor_wl_pointer_send_frame(&server.pointer);
 	return serial;
+}
+
+void input_server_pointer_leave(void)
+{
+	poor_wl_pointer_send_leave(&server.pointer, ++server.serial, &server.surface);
+	poor_wl_pointer_send_frame(&server.pointer);
 }
 
 void input_server_pointer_motion(double x, double y)
@@ -554,6 +576,11 @@ void input_server_pointer_wheel(int32_t value120)
 	poor_wl_pointer_send_frame(&server.pointer);
 }
 
+void input_server_capabilities(uint32_t capabilities)
+{
+	poor_wl_seat_send_capabilities(&server.seat, capabilities);
+}
+
 uint32_t input_server_keyboard_enter(void)
 {
 	uint32_t serial = ++server.serial, storage[1];
@@ -575,6 +602,11 @@ uint32_t input_server_key(uint32_t key, bool pressed)
 	poor_wl_keyboard_send_key(&server.keyboard, serial, 0, key,
 				  pressed ? POOR_WL_KEYBOARD_KEY_STATE_PRESSED : POOR_WL_KEYBOARD_KEY_STATE_RELEASED);
 	return serial;
+}
+
+void input_server_key_repeated(uint32_t key)
+{
+	poor_wl_keyboard_send_key(&server.keyboard, ++server.serial, 0, key, POOR_WL_KEYBOARD_KEY_STATE_REPEATED);
 }
 
 static void client_done(struct poor_wl_client *)
@@ -601,13 +633,15 @@ void input_server_start(struct poor_loop *loop)
 {
 	server.loop = loop;
 	server.selection = server.primary = nullptr;
+	fill_array(server.offer_count, 0);
 	server.serial = 0;
 	foreach_array_ref(server.sources, source)
 		source->used = false;
 	foreach_array_ref(server.blocks, block)
 		block->used = false;
 	input_server.shape = input_server.shape_serial = 0;
-	input_server.offers = input_server.offers_destroyed = 0;
+	input_server.offers = input_server.offers_destroyed = input_server.offers_received = 0;
+	input_server.offer_text = "from another client";
 	input_server.repeat_rate = 25;
 	input_server.repeat_delay = 600;
 	input_server.has_surface = input_server.has_pointer = input_server.has_keyboard = false;

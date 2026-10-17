@@ -14,26 +14,10 @@
 #include "text.frag.h"
 #include "text.vert.h"
 
-/* A glyph: the cell at 'x', 'y' of the image shows the atlas cell at 'u', 'v' in 'color', which is RGBA */
-struct instance {
-	int16_t x, y;
-	uint16_t u, v;
-	uint32_t color;
-};
-
-static_assert(sizeof(struct instance) == 12);
-
 struct push_constants {
 	float viewport[2];
-	float cell[2];
 	float atlas[2];
 };
-
-static const VkClearColorValue BACKGROUND = { .float32 = { 1.0f, 1.0f, 1.0f, 1.0f } };
-static const VkClearColorValue SELECTION = { .float32 = { 0.2f, 0.45f, 0.84f, 1.0f } };
-static const VkClearColorValue SELECTION_INACTIVE = { .float32 = { 0.82f, 0.82f, 0.82f, 1.0f } };
-constexpr uint32_t TEXT_COLOR = 0xff1e1e1e;
-constexpr uint32_t SELECTED_TEXT_COLOR = 0xffffffff;
 
 static bool check(VkResult result, const char *what)
 {
@@ -126,7 +110,7 @@ static bool target_init(struct renderer *renderer, struct render_target *target,
 	return check(vkCreateImageView(renderer->device, &view_info, nullptr, &target->view), "vkCreateImageView") &&
 	       check(vkAllocateCommandBuffers(renderer->device, &commands_info, &target->commands), "vkAllocateCommandBuffers") &&
 	       check(vkCreateFence(renderer->device, &fence_info, nullptr, &target->done), "vkCreateFence") &&
-	       buffer_init(renderer, RENDER_INSTANCES * sizeof(struct instance), VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT,
+	       buffer_init(renderer, RENDER_QUADS * sizeof(struct quad), VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT,
 			   &target->instances, &target->instance_memory, &target->instance_map) &&
 	       buffer_init(renderer, ATLAS_SIZE * ATLAS_SIZE, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT, &target->staging,
 			   &target->staging_memory, &target->staging_map);
@@ -289,7 +273,7 @@ static bool atlas_image_init(struct renderer *renderer)
 	       check(vkCreateImageView(renderer->device, &view_info, nullptr, &renderer->atlas_view), "vkCreateImageView");
 }
 
-/* Each glyph is a strip of two triangles that covers its cell */
+/* Each quad is a strip of two triangles */
 static bool pipeline_create(struct renderer *renderer)
 {
 	static const VkFormat format = RENDER_FORMAT;
@@ -308,13 +292,14 @@ static bool pipeline_create(struct renderer *renderer)
 	};
 	VkVertexInputBindingDescription binding = {
 		.binding = 0,
-		.stride = sizeof(struct instance),
+		.stride = sizeof(struct quad),
 		.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
 	};
 	VkVertexInputAttributeDescription attributes[] = {
-		{ .location = 0, .format = VK_FORMAT_R16G16_SINT, .offset = offsetof(struct instance, x) },
-		{ .location = 1, .format = VK_FORMAT_R16G16_UINT, .offset = offsetof(struct instance, u) },
-		{ .location = 2, .format = VK_FORMAT_R8G8B8A8_UNORM, .offset = offsetof(struct instance, color) },
+		{ .location = 0, .format = VK_FORMAT_R16G16_SINT, .offset = offsetof(struct quad, x) },
+		{ .location = 1, .format = VK_FORMAT_R16G16_UINT, .offset = offsetof(struct quad, width) },
+		{ .location = 2, .format = VK_FORMAT_R16G16_UINT, .offset = offsetof(struct quad, u) },
+		{ .location = 3, .format = VK_FORMAT_R8G8B8A8_UNORM, .offset = offsetof(struct quad, color) },
 	};
 	VkPipelineColorBlendAttachmentState blend_attachment = {
 		.blendEnable = VK_TRUE,
@@ -444,101 +429,20 @@ void renderer_fini(struct renderer *renderer)
 		vkDestroyInstance(renderer->instance, nullptr);
 }
 
-/* Lines that show from 'top' of 'view', none after the end of the text */
-static size_t shown_lines(const struct view *view)
-{
-	size_t rows = view_rows(view), left = view->text->line_count - view->top;
-
-	return left < rows ? left : rows;
-}
-
-/*
- * The glyphs that show, from the atlas. A full atlas starts over once, if the glyphs still don't fit the rest is left
- * out.
- */
-static size_t build_glyphs(struct renderer *renderer, struct instance (*instances)[RENDER_INSTANCES], const struct view *view,
-			   size_t start, size_t end)
-{
-	const struct text *text = view->text;
-	size_t count = 0, columns = view_columns(view);
-	bool cleared = false;
-	struct text_char c;
-	uint16_t u, v;
-
-again:
-	foreach_array_index(arrview(view->top, shown_lines(view), array_ptr(text->lines, text->line_count)), row) {
-		text_chars_init(text, view->top + row, &c);
-		while (text_chars_next(text, &c)) {
-			size_t column = c.width || !c.column ? c.column : c.column - 1;
-
-			if (column < view->left || c.codepoint == ' ')
-				continue;
-			if (c.column >= view->left + columns || count == RENDER_INSTANCES)
-				break;
-			if (!atlas_find(renderer->atlas, c.codepoint, &u, &v)) {
-				if (cleared)
-					return count;
-				atlas_clear(renderer->atlas);
-				cleared = true;
-				count = 0;
-				goto again;
-			}
-			(*instances)[count++] = (struct instance){
-				.x = view->padding + (column - view->left) * view->cell_width,
-				.y = view->padding + row * view->cell_height,
-				.u = u,
-				.v = v,
-				.color = c.offset >= start && c.offset < end && view->focused ? SELECTED_TEXT_COLOR : TEXT_COLOR,
-			};
-		}
-	}
-	return count;
-}
-
-/* The selection of a line covers its line break too, if it goes on */
-static size_t build_selection(struct renderer *renderer, const struct view *view, size_t start, size_t end)
-{
-	const struct text *text = view->text;
-	size_t count = 0;
-
-	foreach_array_index(arrview(view->top, shown_lines(view), array_ptr(text->lines, text->line_count)), row) {
-		size_t line = view->top + row, first = text_line_start(text, line), last = text_line_end(text, line), from, to, x0, x1;
-		int32_t y = view->padding + row * view->cell_height;
-
-		if (end <= first || start > last || count == ARRAY_SIZE(renderer->rects))
-			continue;
-		from = start <= first ? 0 : text_column_of(text, line, start);
-		to = end > last ? text_column_of(text, line, last) + 1 : text_column_of(text, line, end);
-		if (to <= view->left)
-			continue;
-		x0 = view->padding + (from > view->left ? from - view->left : 0) * view->cell_width;
-		x1 = view->padding + (to - view->left) * view->cell_width;
-		if (x1 > (size_t)view->width)
-			x1 = view->width;
-		if (x0 >= x1)
-			continue;
-		renderer->rects[count++] = (VkClearRect){
-			.rect = {
-				.offset = { x0, y },
-				.extent = { x1 - x0, y + view->cell_height > view->height ? view->height - y : view->cell_height },
-			},
-			.layerCount = 1,
-		};
-	}
-	return count;
-}
-
 static void image_barrier(VkCommandBuffer commands, const VkImageMemoryBarrier2 *barrier)
 {
 	vkCmdPipelineBarrier2(commands, &xVkDependencyInfo(.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = barrier));
 }
 
-/* The rows that changed since the last upload go through the staging buffer of the target */
+/*
+ * The rows that changed since the last upload go through the staging buffer of the target. The first upload gets the
+ * atlas ready for the shader, which samples it for solid quads too, even if there are no rows yet.
+ */
 static void upload_atlas(struct renderer *renderer, struct render_target *target)
 {
 	struct atlas *atlas = renderer->atlas;
 	auto staging = (uint8_t (*)[ATLAS_SIZE][ATLAS_SIZE])target->staging_map;
-	size_t rows = atlas->dirty_bottom - atlas->dirty_top;
+	size_t rows = atlas->dirty_top < atlas->dirty_bottom ? atlas->dirty_bottom - atlas->dirty_top : 0;
 	auto barrier = xVkImageMemoryBarrier2(
 		.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
 		.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
@@ -562,9 +466,11 @@ static void upload_atlas(struct renderer *renderer, struct render_target *target
 		),
 	);
 
-	copy_array(arrview_first(rows, staging), arrview(atlas->dirty_top, rows, atlas->pixels));
 	image_barrier(target->commands, &barrier);
-	vkCmdCopyBufferToImage2(target->commands, &copy);
+	if (rows) {
+		copy_array(arrview_first(rows, staging), arrview(atlas->dirty_top, rows, atlas->pixels));
+		vkCmdCopyBufferToImage2(target->commands, &copy);
+	}
 	barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
 	barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 	barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
@@ -575,10 +481,11 @@ static void upload_atlas(struct renderer *renderer, struct render_target *target
 	atlas_uploaded(atlas);
 }
 
-static void draw_glyphs(struct renderer *renderer, struct render_target *target, const struct view *view, size_t count)
+static void draw_quads(struct renderer *renderer, struct render_target *target, const struct poor_wl_swapchain_buffer *buffer,
+		       size_t count)
 {
-	VkViewport viewport = { .width = view->width, .height = view->height, .maxDepth = 1.0f };
-	VkRect2D scissor = { .extent = { view->width, view->height } };
+	VkViewport viewport = { .width = buffer->width, .height = buffer->height, .maxDepth = 1.0f };
+	VkRect2D scissor = { .extent = { buffer->width, buffer->height } };
 	VkDeviceSize offset = 0;
 	VkDescriptorImageInfo atlas = { .imageView = renderer->atlas_view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
 	auto descriptors = xVkPushDescriptorSetInfo(
@@ -594,8 +501,7 @@ static void draw_glyphs(struct renderer *renderer, struct render_target *target,
 		),
 	);
 	struct push_constants constants = {
-		.viewport = { view->width, view->height },
-		.cell = { view->cell_width, view->cell_height },
+		.viewport = { buffer->width, buffer->height },
 		.atlas = { ATLAS_SIZE, ATLAS_SIZE },
 	};
 	auto push = xVkPushConstantsInfo(
@@ -619,7 +525,8 @@ static void draw_glyphs(struct renderer *renderer, struct render_target *target,
  * the fence of the batch signals. The compositor was done with the buffer, and so was the last batch that drew it,
  * which Vulkan learns from the fence of that batch.
  */
-int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *buffer, const struct view *view)
+int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffer *buffer, uint32_t background,
+		       size_t count, const struct quad (*quads)[count])
 {
 	struct render_target *target = target_of(renderer, buffer);
 	VkImage image = ((struct poor_wl_vulkan_image *)buffer->data)->image;
@@ -655,13 +562,14 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
 			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-			.clearValue = { .color = BACKGROUND },
+			.clearValue = { .color = { .float32 = {
+				(background & 0xff) / 255.0f,
+				(background >> 8 & 0xff) / 255.0f,
+				(background >> 16 & 0xff) / 255.0f,
+				1.0f,
+			} } },
 		),
 	);
-	VkClearAttachment selection = {
-		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		.clearValue = { .color = view->focused ? SELECTION : SELECTION_INACTIVE },
-	};
 	auto submit = xVkSubmitInfo2(
 		.commandBufferInfoCount = 1,
 		.pCommandBufferInfos = &xVkCommandBufferSubmitInfo(.commandBuffer = target->commands),
@@ -675,29 +583,23 @@ int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *bu
 		.semaphore = renderer->rendered,
 		.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
 	);
-	size_t start, end, glyphs, rects;
 	int fence;
 
-	assert(buffer->width == view->width && buffer->height == view->height);
+	assert(count <= RENDER_QUADS);
 	if (vkGetFenceStatus(renderer->device, target->done) != VK_SUCCESS) {
 		log_printf("poor_text_viewer: a buffer came back before its drawing was done\n");
 		return -1;
 	}
-	if (!view_selection(view, &start, &end))
-		start = end = 0;
-	glyphs = build_glyphs(renderer, (struct instance (*)[RENDER_INSTANCES])target->instance_map, view, start, end);
-	rects = start < end ? build_selection(renderer, view, start, end) : 0;
+	copy_array(arrview_first(count, (struct quad (*)[RENDER_QUADS])target->instance_map), quads);
 	if (!check(vkResetFences(renderer->device, 1, &target->done), "vkResetFences") ||
 	    !check(vkBeginCommandBuffer(target->commands, &begin), "vkBeginCommandBuffer"))
 		return -1;
-	if (renderer->atlas->dirty_top < renderer->atlas->dirty_bottom)
+	if (!renderer->atlas_valid || renderer->atlas->dirty_top < renderer->atlas->dirty_bottom)
 		upload_atlas(renderer, target);
 	image_barrier(target->commands, &draw);
 	vkCmdBeginRendering(target->commands, &rendering);
-	if (rects)
-		vkCmdClearAttachments(target->commands, 1, &selection, rects, renderer->rects);
-	if (glyphs)
-		draw_glyphs(renderer, target, view, glyphs);
+	if (count)
+		draw_quads(renderer, target, buffer, count);
 	vkCmdEndRendering(target->commands);
 	image_barrier(target->commands, &release);
 	if (!check(vkEndCommandBuffer(target->commands), "vkEndCommandBuffer") ||

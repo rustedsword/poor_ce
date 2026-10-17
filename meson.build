@@ -55,6 +55,9 @@ client_dep = dependency('poor_wayland_client', fallback: 'poor_wayland', default
 scanner_dep = dependency('poor_wayland_scanner', native: true, fallback: 'poor_wayland', default_options: [ 'tests=false' ])
 scanner = find_program(scanner_dep.get_variable('poor_wayland_scanner'), native: true)
 poor_loop_dep = dependency('poor_loop')
+# The submodules take an older installed liburing too, but pipes need 2.12
+dependency('liburing', version: '>= 2.12',
+	not_found_message: 'the submodule is built instead with --force-fallback-for=liburing')
 poor_base_dep = dependency('poor_base')
 wayland_protocols_dep = dependency('wayland-protocols', version: '>= 1.49', fallback: 'wayland-protocols',
 	default_options: [ 'tests=false' ])

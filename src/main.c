@@ -15,30 +15,32 @@
 #include <sys/signalfd.h>
 #include <unistd.h>
 
+#include "editor.h"
 #include "fractional-scale-v1-client-protocol.h"
 #include "logger.h"
+#include "path.h"
 #include "poor_wayland_client_display.h"
 #include "render.h"
+#include "scene.h"
 #include "seat.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 /*
- * A window that shows a text file, drawn with Vulkan on the GPU that the compositor names in its dmabuf feedback and
- * presented through the swapchain with explicit synchronization. It runs until its close button, Ctrl+Q, SIGINT or
- * SIGTERM. WAYLAND_DEBUG=client shows the protocol.
+ * A window that edits the files of a directory, drawn with Vulkan on the GPU that the compositor names in its dmabuf
+ * feedback and presented through the swapchain with explicit synchronization. It runs until its close button, Ctrl+Q,
+ * SIGINT or SIGTERM. WAYLAND_DEBUG=client shows the protocol.
  */
-constexpr int32_t DEFAULT_WIDTH = 800;
-constexpr int32_t DEFAULT_HEIGHT = 600;
+constexpr int32_t DEFAULT_WIDTH = 1100;
+constexpr int32_t DEFAULT_HEIGHT = 700;
 constexpr uint32_t FONT_SIZE = 15;
 constexpr int32_t PADDING = 4;
 constexpr uint64_t DRAIN_TIMEOUT_NS = 1'000'000'000;
-constexpr size_t TEXT_BYTES = 64 << 20;
-constexpr size_t TEXT_LINES = 4 << 20;
+
+static const char *const SERVER[] = { "clangd", "--log=error", nullptr };
 
 poor_loop_fd_declare(signal_file);
-poor_loop_fd_declare(text_file);
 
 struct app {
 	struct poor_loop loop;
@@ -62,23 +64,23 @@ struct app {
 	struct renderer renderer;
 	struct font font;
 	struct seat seat;
-	struct text text;
-	struct view view;
 	signal_file signals;
-	text_file file;
-	struct poor_loop_op signal_op, open_op, read_op, node_op, idle_op;
+	struct poor_loop_op signal_op, root_op, node_op, idle_op;
 	struct signalfd_siginfo siginfo;
+	struct statx root_statx;
 	sigset_t sigset;
-	const char *path;
+	char **paths;
+	size_t path_count;
 	int status, drm_fd, idle_fd;
 	int32_t width, height, pending_width, pending_height;
 	uint32_t scale, font_pixels;
-	size_t loaded;
 	bool have_compositor, have_dmabuf, have_syncobj, have_wm_base;
 	bool have_decoration_manager, have_fractional_manager, have_viewporter, have_window;
-	bool have_renderer, have_font, swapchain_started, swapchain_closed, signals_closed, file_open;
+	bool have_renderer, have_font, swapchain_started, swapchain_closed, signals_closed;
 	bool pending_activated, viewport_changed, closing;
 	char node_path[32];
+	char cwd[PATH_MAX];
+	char path[PATH_MAX];
 	char in[16384];
 	char out[16384];
 	union poor_wl_map_entry objects[128];
@@ -87,11 +89,13 @@ struct app {
 
 /* Large memory of the app, which isn't in struct app to keep its debug builds' stack frames small */
 static struct atlas atlas;
-static char text_bytes[TEXT_BYTES];
-static uint32_t text_lines[TEXT_LINES];
+static struct editor editor;
+static struct editor_memory editor_memory;
+static struct seat_memory seat_memory;
+static struct quad quads[RENDER_QUADS];
+static struct app app;
 
 poor_loop_group_attach(signal_file, struct app, signals, signal_op, on_signal);
-poor_loop_group_attach(text_file, struct app, file, read_op, on_read);
 
 static struct app *app_of_swapchain(struct poor_wl_swapchain *swapchain)
 {
@@ -128,16 +132,14 @@ static void on_idle(struct poor_loop *, struct poor_loop_op *op, const struct io
 	app_teardown(app);
 }
 
-/* The drawing has to end before the buffers go, which is waited for through the loop */
+/* The drawing has to end before the buffers go, which is waited for through the loop. Saves go on. */
 static void app_quit(struct app *app, int status)
 {
 	if (app->closing)
 		return;
 	app->closing = true;
 	app->status = status;
-	foreach_array_ref(((struct poor_loop_op *[]){ &app->open_op, &app->read_op }), op)
-		if ((*op)->pending)
-			io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(&app->loop)), *op, 0);
+	editor_stop(&editor);
 	app->idle_fd = app->have_renderer ? renderer_idle_fence(&app->renderer) : -1;
 	if (app->idle_fd < 0) {
 		if (app->have_renderer && app->renderer.device)
@@ -174,82 +176,127 @@ static void app_layout(struct app *app)
 		atlas_clear(&atlas);
 		app->font_pixels = pixels;
 	}
-	view_resize(&app->view, width, height, app->font.cell_width, app->font.cell_height, scaled(PADDING, app->scale));
-	app->view.scale = app->scale;
+	editor_resize(&editor, width, height, app->font.cell_width, app->font.cell_height, scaled(PADDING, app->scale), app->scale);
+	seat_resize(&app->seat, app->scale, app->font.cell_width, app->font.cell_height);
 	app->viewport_changed = true;
 	poor_wl_swapchain_resize(&app->swapchain, width, height);
 	app_changed(app);
 }
 
-static void seat_changed(struct seat *seat)
+static struct app *app_of_seat(struct seat *seat)
 {
-	app_changed(container_of(seat, struct app, seat));
+	return container_of(seat, struct app, seat);
 }
 
-static void seat_quit(struct seat *seat)
+static bool seat_key(struct seat *seat, xkb_keysym_t sym, uint32_t modifiers, size_t size, const char (*text)[size])
 {
-	app_quit(container_of(seat, struct app, seat), 0);
+	return !app_of_seat(seat)->closing && editor_key(&editor, sym, modifiers, size, text);
+}
+
+static void seat_button(struct seat *seat, double x, double y, uint32_t button, bool pressed, uint32_t time, uint32_t modifiers)
+{
+	if (!app_of_seat(seat)->closing)
+		editor_button(&editor, x, y, button, pressed, time, modifiers);
+}
+
+static void seat_motion(struct seat *seat, double x, double y)
+{
+	if (!app_of_seat(seat)->closing)
+		editor_motion(&editor, x, y);
+}
+
+static void seat_leave(struct seat *seat)
+{
+	if (!app_of_seat(seat)->closing)
+		editor_leave(&editor);
+}
+
+static void seat_scroll(struct seat *seat, double x, double y, ptrdiff_t rows, ptrdiff_t columns)
+{
+	if (!app_of_seat(seat)->closing)
+		editor_scroll(&editor, x, y, rows, columns);
+}
+
+static void seat_pasted(struct seat *seat, size_t size, const char (*bytes)[size])
+{
+	if (!app_of_seat(seat)->closing)
+		editor_paste(&editor, bytes);
 }
 
 static const struct seat_listener seat_listener = {
-	.changed = seat_changed,
-	.quit = seat_quit,
+	.key = seat_key,
+	.button = seat_button,
+	.motion = seat_motion,
+	.leave = seat_leave,
+	.scroll = seat_scroll,
+	.paste = seat_pasted,
 };
 
-/* The file is read whole, as much of it as there is memory for */
-static void file_read(struct app *app)
+static void editor_changed(struct editor *)
 {
-	io_uring_prep_read_array(need_sqe(poor_loop_group_get_sqe_or_submit(&app->loop, &app->file, &app->read_op)), app->file.fd,
-				 arrview_cfront(app->loaded, text_bytes), -1);
+	app_changed(&app);
 }
 
-POOR_LOOP_GROUP_OP(on_read, loop, file, op, cqe)
+static void editor_title(struct editor *, const char *title)
 {
-	struct app *app = container_of(file, struct app, file);
+	if (app.have_window)
+		poor_xdg_toplevel_set_title(&app.toplevel, title);
+}
 
-	if (app->closing)
-		return;
-	if (cqe->res < 0) {
-		log_printf("poor_text_viewer: %s: %s\n", app->path, strerror(-cqe->res));
+static bool editor_copy(struct editor *, bool primary, size_t size, const char (*bytes)[size])
+{
+	return seat_copy(&app.seat, primary, bytes);
+}
+
+static bool editor_paste_request(struct editor *, bool primary)
+{
+	return seat_paste(&app.seat, primary);
+}
+
+static void editor_cursor(struct editor *, uint32_t shape)
+{
+	seat_cursor(&app.seat, shape);
+}
+
+static void editor_quit_request(struct editor *)
+{
+	app_quit(&app, 0);
+}
+
+static const struct editor_listener editor_listener = {
+	.changed = editor_changed,
+	.title = editor_title,
+	.copy = editor_copy,
+	.paste = editor_paste_request,
+	.cursor = editor_cursor,
+	.quit = editor_quit_request,
+};
+
+/* A directory as the first argument is the root, otherwise the current one is. The other arguments are files. */
+static void start(struct app *app, bool directory)
+{
+	char root[PATH_MAX];
+
+	if (!path_join(root, app->cwd, directory ? app->paths[0] : ".")) {
+		log_printf("poor_text_viewer: %s is too long\n", app->paths[0]);
 		app_quit(app, 1);
 		return;
 	}
-	app->loaded += cqe->res;
-	if (cqe->res > 0 && app->loaded < ARRAY_SIZE(text_bytes)) {
-		file_read(app);
-		return;
+	editor_start(&editor, root, SERVER);
+	foreach_array_const_ref(arrview(directory, app->path_count - directory, array_ptr(app->paths, app->path_count)), path) {
+		if (path_join(app->path, app->cwd, *path))
+			editor_open(&editor, app->path);
+		else
+			log_printf("poor_text_viewer: %s is too long\n", *path);
 	}
-	text_init(&app->text, arrview_first(app->loaded, text_bytes), text_lines);
-	if (app->text.size < app->loaded || app->loaded == ARRAY_SIZE(text_bytes))
-		log_printf("poor_text_viewer: %s is cut off after %zu bytes\n", app->path, app->text.size);
-	view_resize(&app->view, app->view.width, app->view.height, app->view.cell_width, app->view.cell_height,
-		    app->view.padding);
-	app_changed(app);
 }
 
-POOR_LOOP_FD_DONE(text_file, loop, file)
+static void on_root(struct poor_loop *, struct poor_loop_op *op, const struct io_uring_cqe *cqe)
 {
-	container_of(file, struct app, file)->file_open = false;
-}
+	struct app *app = container_of(op, struct app, root_op);
 
-static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io_uring_cqe *cqe)
-{
-	struct app *app = container_of(op, struct app, open_op);
-
-	if (app->closing) {
-		if (cqe->res >= 0)
-			poor_loop_close_fd_or_submit(&app->loop, cqe->res, 0);
-		return;
-	}
-	if (cqe->res < 0) {
-		log_printf("poor_text_viewer: %s: %s\n", app->path, strerror(-cqe->res));
-		app_quit(app, 1);
-		return;
-	}
-	poor_loop_fd_init(&app->file, cqe->res);
-	poor_loop_op_init(&app->read_op, on_read);
-	app->file_open = true;
-	file_read(app);
+	if (!app->closing)
+		start(app, !cqe->res && S_ISDIR(app->root_statx.stx_mode));
 }
 
 /* The render node only makes the timelines of explicit synchronization */
@@ -303,11 +350,14 @@ static void swapchain_device(struct poor_wl_swapchain *swapchain, dev_t device)
 static void swapchain_frame(struct poor_wl_swapchain *swapchain, struct poor_wl_swapchain_buffer *buffer, uint32_t)
 {
 	struct app *app = app_of_swapchain(swapchain);
+	size_t count;
 	int fence;
 
 	if (app->closing)
 		return;
-	fence = renderer_draw(&app->renderer, buffer, &app->view);
+	editor_layout(&editor);
+	count = scene_build(&editor, &atlas, quads);
+	fence = renderer_draw(&app->renderer, buffer, SCENE_BACKGROUND, arrview_first(count, quads));
 	if (fence < 0) {
 		app_quit(app, 1);
 		return;
@@ -329,10 +379,7 @@ static void shell_surface_configure(void *data, struct poor_xdg_surface *shell_s
 	struct app *app = data;
 
 	poor_xdg_surface_ack_configure(shell_surface, serial);
-	if (app->pending_activated != app->view.focused) {
-		app->view.focused = app->pending_activated;
-		app_changed(app);
-	}
+	editor_focus(&editor, app->pending_activated);
 	if (app->pending_width != app->width || app->pending_height != app->height || !app->have_window) {
 		app->width = app->pending_width;
 		app->height = app->pending_height;
@@ -359,9 +406,9 @@ static void toplevel_configure(void *data, struct poor_xdg_toplevel *, int32_t w
 			app->pending_activated = true;
 }
 
-static void toplevel_close(void *data, struct poor_xdg_toplevel *)
+static void toplevel_close(void *, struct poor_xdg_toplevel *)
 {
-	app_quit(data, 0);
+	editor_quit(&editor);
 }
 
 static void toplevel_configure_bounds(void *, struct poor_xdg_toplevel *, int32_t, int32_t)
@@ -483,15 +530,13 @@ static const struct poor_wl_registry_listener registry_listener = {
 /* Scaling needs the viewport, the server draws the decorations if it can */
 static void window_init(struct app *app)
 {
-	const char *name = strrchr(app->path, '/');
-
 	poor_wl_compositor_create_surface(&app->compositor, &app->surface);
 	poor_wl_surface_add_listener(&app->surface, &surface_listener, app);
 	poor_xdg_wm_base_get_xdg_surface(&app->wm_base, &app->shell_surface, &app->surface);
 	poor_xdg_surface_add_listener(&app->shell_surface, &shell_surface_listener, app);
 	poor_xdg_surface_get_toplevel(&app->shell_surface, &app->toplevel);
 	poor_xdg_toplevel_add_listener(&app->toplevel, &toplevel_listener, app);
-	poor_xdg_toplevel_set_title(&app->toplevel, name ? name + 1 : app->path);
+	poor_xdg_toplevel_set_title(&app->toplevel, editor.title);
 	poor_xdg_toplevel_set_app_id(&app->toplevel, "poor_text_viewer");
 	if (app->have_decoration_manager) {
 		poor_zxdg_decoration_manager_v1_get_toplevel_decoration(&app->decoration_manager, &app->decoration, &app->toplevel);
@@ -578,31 +623,37 @@ static void app_prepare(struct app *app)
 	app->width = app->pending_width = DEFAULT_WIDTH;
 	app->height = app->pending_height = DEFAULT_HEIGHT;
 	app->scale = 120;
-	app->loaded = 0;
 	app->have_compositor = app->have_dmabuf = app->have_syncobj = app->have_wm_base = false;
 	app->have_decoration_manager = app->have_fractional_manager = app->have_viewporter = app->have_window = false;
-	app->have_renderer = app->swapchain_started = app->swapchain_closed = app->file_open = false;
+	app->have_renderer = app->swapchain_started = app->swapchain_closed = false;
 	app->pending_activated = app->viewport_changed = app->closing = false;
 	app->have_font = false;
 	app->signals_closed = true;
-	poor_loop_op_init(&app->open_op, on_open);
-	poor_loop_op_init(&app->read_op, on_read);
+	poor_loop_op_init(&app->root_op, on_root);
 	poor_loop_op_init(&app->node_op, on_node);
 	poor_loop_op_init(&app->idle_op, on_idle);
 	foreach_array_ref(app->seat.transfers, transfer)
 		transfer->used = false;
+	app->seat.paste.busy = false;
+	editor_init(&editor, &app->loop, &editor_listener, &editor_memory);
 }
 
-/* A client that pastes may close its pipe early, which is no reason to die */
-[[nodiscard]] static int app_init(struct app *app, const char *path)
+/*
+ * getcwd() is the one way to learn the current directory, io_uring can't. A client that pastes may close its pipe
+ * early, which is no reason to die.
+ */
+[[nodiscard]] static int app_init(struct app *app, size_t count, char *(*paths)[count])
 {
 	struct poor_wl_connection_memory memory = POOR_WL_CONNECTION_MEMORY(app->in, app->out, app->objects, app->server_objects);
 	struct sigaction ignore = { .sa_handler = SIG_IGN };
 	int fd;
 
-	app->path = path;
-	text_init(&app->text, arrview_first(app->loaded, text_bytes), text_lines);
-	view_init(&app->view, &app->text);
+	app->paths = *paths;
+	app->path_count = count;
+	if (!getcwd(app->cwd, sizeof(app->cwd))) {
+		log_printf("poor_text_viewer: getcwd: %s\n", strerror(errno));
+		return -1;
+	}
 	app->have_font = font_init(&app->font, FONT_SIZE);
 	if (!app->have_font) {
 		log_printf("poor_text_viewer: the font failed\n");
@@ -610,7 +661,7 @@ static void app_prepare(struct app *app)
 	}
 	app->font_pixels = FONT_SIZE;
 	atlas_init(&atlas, &app->font);
-	if (!seat_init(&app->seat, &app->loop, &app->view, &seat_listener)) {
+	if (!seat_init(&app->seat, &app->loop, &seat_listener, &seat_memory)) {
 		log_printf("poor_text_viewer: no xkbcommon context\n");
 		return -1;
 	}
@@ -624,8 +675,11 @@ static void app_prepare(struct app *app)
 	poor_wl_registry_add_listener(&app->registry, &registry_listener, app);
 	poor_wl_display_sync(&app->display, &app->sync);
 	poor_wl_callback_add_listener(&app->sync, &sync_listener, app);
-	io_uring_prep_openat(need_sqe(poor_loop_get_sqe_or_submit(&app->loop, &app->open_op)), AT_FDCWD, path, O_RDONLY | O_CLOEXEC,
-			     0);
+	if (count)
+		io_uring_prep_statx(need_sqe(poor_loop_get_sqe_or_submit(&app->loop, &app->root_op)), AT_FDCWD, (*paths)[0], 0,
+				    STATX_TYPE, &app->root_statx);
+	else
+		start(app, false);
 
 	sigaction(SIGPIPE, &ignore, nullptr);
 	sigemptyset(&app->sigset);
@@ -646,13 +700,14 @@ static void app_prepare(struct app *app)
 	return 0;
 }
 
-/* Write out the log, then wait for the closes, which nobody tracks */
+/* Write out the log and the files, then wait for the closes, which nobody tracks */
 static int app_finish(struct app *app)
 {
 	int ret = 0;
 
-	while (!ret && (!app->signals_closed || (app->swapchain_started && !app->swapchain_closed) || app->open_op.pending ||
-			app->file_open || app->node_op.pending || app->idle_op.pending || seat_busy(&app->seat) || log_pending()))
+	while (!ret && (!app->signals_closed || (app->swapchain_started && !app->swapchain_closed) || app->root_op.pending ||
+			app->node_op.pending || app->idle_op.pending || seat_busy(&app->seat) || editor_busy(&editor) ||
+			log_pending()))
 		ret = poor_loop_run_once(&app->loop);
 	if (!ret)
 		ret = poor_loop_drain(&app->loop, poor_loop_now() + DRAIN_TIMEOUT_NS);
@@ -668,11 +723,10 @@ static int app_finish(struct app *app)
 
 int main(int argc, char **argv)
 {
-	static struct app app;
-	struct io_uring_params params = {};
 	int ret;
 
-	ret = poor_loop_init(&app.loop, 64, &params);
+	ret = poor_loop_init(&app.loop, 64,
+			     &(struct io_uring_params){ .flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN });
 	if (ret) {
 		dprintf(STDERR_FILENO, "poor_text_viewer: io_uring: %s\n", strerror(-ret));
 		return 1;
@@ -680,12 +734,12 @@ int main(int argc, char **argv)
 	log_init(&app.loop, "poor_text_viewer");
 	poor_wl_log_set_handler_client(log_vprintf);
 	app_prepare(&app);
-	if (argc != 2) {
-		log_printf("usage: poor_text_viewer FILE\n");
+	if (argc > 1 && argv[1][0] == '-') {
+		log_printf("usage: poor_text_viewer [DIRECTORY] [FILE]...\n");
 		app.status = 2;
 		return app_finish(&app);
 	}
-	if (app_init(&app, argv[1]) < 0) {
+	if (app_init(&app, argc - 1, arrview_cfront(1, array_ptr(argv, argc))) < 0) {
 		app.status = 1;
 		return app_finish(&app);
 	}

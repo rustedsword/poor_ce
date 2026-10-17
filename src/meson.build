@@ -43,11 +43,13 @@ foreach shader : [ 'text.vert', 'text.frag' ]
 endforeach
 
 viewer_inc = include_directories('.')
-text_sources = files('text.c', 'view.c')
+text_sources = files('text.c', 'view.c', 'history.c', 'document.c', 'syntax.c', 'json.c', 'path.c')
 font_sources = files('font.c', 'atlas.c')
 log_sources = files('logger.c')
 seat_sources = files('seat.c')
 render_sources = files('render.c')
+lsp_sources = files('lsp.c')
+editor_sources = files('tree.c', 'editor.c', 'scene.c')
 
 executable(
 	'poor_text_viewer',
@@ -57,6 +59,8 @@ executable(
 	log_sources,
 	seat_sources,
 	render_sources,
+	lsp_sources,
+	editor_sources,
 	client_protocol_h,
 	protocol_c,
 	shaders_h,

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include <assert.h>
+#include <string.h>
 
 #include "text.h"
 
@@ -27,33 +28,192 @@ uint32_t utf8_decode_impl(size_t size, const char (*bytes)[size], size_t *length
 	return c;
 }
 
-void text_init_impl(struct text *text, size_t size, const char (*bytes)[size], size_t capacity, uint32_t (*lines)[capacity])
+void text_init_impl(struct text *text, size_t capacity, char (*bytes)[capacity], size_t line_capacity,
+		    uint32_t (*lines)[line_capacity], size_t state_capacity, uint8_t (*states)[state_capacity])
+{
+	assert(line_capacity && line_capacity == state_capacity && capacity <= UINT32_MAX);
+	text->bytes = *bytes;
+	text->lines = *lines;
+	text->states = *states;
+	text->capacity = capacity;
+	text->line_capacity = line_capacity;
+	text->size = 0;
+	text->line_count = 1;
+	text->lines[0] = 0;
+	text->states[0] = 0;
+	text->columns = 0;
+	text->widest = 1;
+}
+
+static size_t width(const struct text *text, size_t line)
 {
 	struct text_char c;
 
-	assert(capacity && size <= UINT32_MAX);
-	text->bytes = *bytes;
-	text->lines = *lines;
+	text_chars_init(text, line, &c);
+	while (text_chars_next(text, &c))
+		;
+	return c.column + c.width;
+}
+
+/* Lines that come or go, the widest ones are counted again once none of them is left */
+static void measure(struct text *text, size_t first, size_t count, bool gone)
+{
+	foreach_array_index(arrview(first, count, array_ptr(text->lines, text->line_count)), i) {
+		size_t columns = width(text, first + i);
+
+		if (gone && columns == text->columns) {
+			text->widest--;
+		} else if (!gone && columns > text->columns) {
+			text->columns = columns;
+			text->widest = 1;
+		} else if (!gone && columns == text->columns) {
+			text->widest++;
+		}
+	}
+	if (!gone && !text->widest) {
+		text->columns = 0;
+		measure(text, 0, text->line_count, false);
+	}
+}
+
+bool text_load(struct text *text, size_t size)
+{
+	auto bytes = arrview_first(size, array_ptr(text->bytes, text->capacity));
+	bool fits = true;
+
+	assert(size <= text->capacity);
 	text->size = size;
 	text->line_count = 1;
-	(*lines)[0] = 0;
-	foreach_array_index(bytes, i) {
-		if ((*bytes)[i] != '\n' || i + 1 == size)
-			continue;
-		if (text->line_count == capacity) {
-			text->size = i;
+	for (const char *p = *bytes; (p = memchr(p, '\n', array_end_ref(bytes) - p)); p++) {
+		if (text->line_count == text->line_capacity) {
+			text->size = p - *bytes;
+			fits = false;
 			break;
 		}
-		(*lines)[text->line_count++] = i + 1;
+		text->lines[text->line_count++] = p + 1 - *bytes;
 	}
-	text->columns = 0;
-	foreach_array_index(arrview_first(text->line_count, lines), line) {
-		text_chars_init(text, line, &c);
-		while (text_chars_next(text, &c))
-			;
-		if (c.column + c.width > text->columns)
-			text->columns = c.column + c.width;
+	memset_array(arrview_first(text->line_count, array_ptr(text->states, text->line_capacity)), 0);
+	text->columns = text->widest = 0;
+	measure(text, 0, text->line_count, false);
+	return fits;
+}
+
+static size_t breaks(size_t size, const char (*bytes)[size])
+{
+	size_t count = 0;
+
+	foreach_array_const_ref(bytes, byte)
+		count += *byte == '\n';
+	return count;
+}
+
+bool text_fits_impl(const struct text *text, size_t start, size_t end, size_t size, const char (*bytes)[size])
+{
+	size_t lines = text_line_of(text, end) - text_line_of(text, start);
+
+	return text->size - (end - start) + size <= text->capacity &&
+	       text->line_count - lines + breaks(size, bytes) <= text->line_capacity;
+}
+
+/* The line starts from 'start' to 'end' go, the line breaks of 'bytes' start lines after the line of 'start' */
+bool text_replace_impl(struct text *text, size_t start, size_t end, size_t size, const char (*bytes)[size])
+{
+	auto all = array_ptr(text->bytes, text->capacity);
+	auto lines = array_ptr(text->lines, text->line_capacity);
+	auto states = array_ptr(text->states, text->line_capacity);
+	size_t first = text_line_of(text, start), last = text_line_of(text, end), added = breaks(size, bytes);
+	size_t line = first + 1, line_count = text->line_count - (last - first) + added;
+
+	assert(start <= end && end <= text->size);
+	if (!text_fits_impl(text, start, end, size, bytes))
+		return false;
+	measure(text, first, last - first + 1, true);
+	auto tail = arrview(end, text->size - end, all);
+	auto moved_lines = arrview(last + 1, text->line_count - last - 1, lines);
+	auto moved_states = arrview(last + 1, ARRAY_SIZE(moved_lines), states);
+	memmove(arrview(start + size, ARRAY_SIZE(tail), all), tail, ARRAY_SIZE_BYTES(tail));
+	copy_array(arrview(start, size, all), bytes);
+	memmove(arrview(first + 1 + added, ARRAY_SIZE(moved_lines), lines), moved_lines, ARRAY_SIZE_BYTES(moved_lines));
+	memmove(arrview(first + 1 + added, ARRAY_SIZE(moved_states), states), moved_states, ARRAY_SIZE_BYTES(moved_states));
+	foreach_array_index(bytes, i) {
+		if ((*bytes)[i] != '\n')
+			continue;
+		(*lines)[line] = start + i + 1;
+		(*states)[line++] = 0;
 	}
+	foreach_array_ref(arrview(line, line_count - line, lines), next)
+		*next = *next - (end - start) + size;
+	text->size = text->size - (end - start) + size;
+	text->line_count = line_count;
+	measure(text, first, added + 1, false);
+	return true;
+}
+
+/* Where the line break before 'next' starts, of a line from 'start' */
+static size_t line_break(const struct text *text, size_t start, size_t next)
+{
+	return next - 1 > start && text->bytes[next - 2] == '\r' ? next - 2 : next - 1;
+}
+
+bool text_prefix_impl(struct text *text, size_t first, size_t last, size_t size, const char (*bytes)[size])
+{
+	auto all = array_ptr(text->bytes, text->capacity);
+	auto lines = array_ptr(text->lines, text->line_capacity);
+	size_t end = text_line_end(text, last), next = end, count = 0, grow;
+
+	assert(first <= last && last < text->line_count);
+	for (size_t line = first; line <= last; line++)
+		count += text_line_start(text, line) < text_line_end(text, line);
+	grow = count * size;
+	if (text->size + grow > text->capacity)
+		return false;
+	measure(text, first, last - first + 1, true);
+	auto tail = arrview(end, text->size - end, all);
+	memmove(arrview(end + grow, ARRAY_SIZE(tail), all), tail, ARRAY_SIZE_BYTES(tail));
+	for (size_t line = last + 1, shift = grow; line-- > first;) {
+		size_t start = (*lines)[line];
+		bool full = start < (line == last ? end : line_break(text, start, next));
+		auto moved = arrview(start, next - start, all);
+
+		memmove(arrview(start + shift, ARRAY_SIZE(moved), all), moved, ARRAY_SIZE_BYTES(moved));
+		if (full) {
+			shift -= size;
+			copy_array(arrview(start + shift, size, all), bytes);
+		}
+		(*lines)[line] = start + shift;
+		next = start;
+	}
+	foreach_array_ref(arrview(last + 1, text->line_count - last - 1, lines), line)
+		*line += grow;
+	text->size += grow;
+	measure(text, first, last - first + 1, false);
+	return true;
+}
+
+void text_unprefix(struct text *text, size_t first, size_t last, size_t (*cut)(const void *data, size_t start, size_t end),
+		   const void *data)
+{
+	auto all = array_ptr(text->bytes, text->capacity);
+	auto lines = array_ptr(text->lines, text->line_capacity);
+	size_t end = text_line_end(text, last), removed = 0;
+
+	assert(first <= last && last < text->line_count);
+	measure(text, first, last - first + 1, true);
+	for (size_t line = first; line <= last; line++) {
+		size_t start = (*lines)[line], next = line == last ? end : (*lines)[line + 1];
+		size_t count = cut(data, start, line == last ? end : line_break(text, start, next));
+		auto moved = arrview(start + count, next - start - count, all);
+
+		memmove(arrview(start - removed, ARRAY_SIZE(moved), all), moved, ARRAY_SIZE_BYTES(moved));
+		(*lines)[line] = start - removed;
+		removed += count;
+	}
+	auto tail = arrview(end, text->size - end, all);
+	memmove(arrview(end - removed, ARRAY_SIZE(tail), all), tail, ARRAY_SIZE_BYTES(tail));
+	foreach_array_ref(arrview(last + 1, text->line_count - last - 1, lines), line)
+		*line -= removed;
+	text->size -= removed;
+	measure(text, first, last - first + 1, false);
 }
 
 size_t text_line_start(const struct text *text, size_t line)
@@ -63,13 +223,9 @@ size_t text_line_start(const struct text *text, size_t line)
 
 size_t text_line_end(const struct text *text, size_t line)
 {
-	size_t start = text->lines[line], end = line + 1 < text->line_count ? text->lines[line + 1] - 1 : text->size;
-
-	if (end > start && end == text->size && text->bytes[end - 1] == '\n')
-		end--;
-	if (end > start && text->bytes[end - 1] == '\r')
-		end--;
-	return end;
+	if (line + 1 == text->line_count)
+		return text->size;
+	return line_break(text, text->lines[line], text->lines[line + 1]);
 }
 
 size_t text_line_of(const struct text *text, size_t offset)
@@ -87,13 +243,6 @@ size_t text_line_of(const struct text *text, size_t offset)
 	return low;
 }
 
-void text_chars_init(const struct text *text, size_t line, struct text_char *c)
-{
-	c->next = text->lines[line];
-	c->end = text_line_end(text, line);
-	c->column = c->width = 0;
-}
-
 /* Combining marks go over the character before them */
 static bool combining(uint32_t c)
 {
@@ -107,6 +256,55 @@ static bool combining(uint32_t c)
 	return false;
 }
 
+size_t text_next(const struct text *text, size_t offset)
+{
+	auto all = array_ptr(text->bytes, text->size);
+	size_t line = text_line_of(text, offset), end = text_line_end(text, line), length;
+
+	if (offset >= end)
+		return line + 1 < text->line_count ? text->lines[line + 1] : text->size;
+	do {
+		utf8_decode(arrview(offset, end - offset, all), &length);
+		offset += length;
+	} while (offset < end && combining(utf8_decode(arrview(offset, end - offset, all), &length)));
+	return offset;
+}
+
+size_t text_prev(const struct text *text, size_t offset)
+{
+	size_t line = text_line_of(text, offset), boundary = text->lines[line];
+	struct text_char c;
+
+	if (offset == boundary)
+		return line ? text_line_end(text, line - 1) : 0;
+	text_chars_init(text, line, &c);
+	while (text_chars_next(text, &c) && c.offset < offset)
+		if (c.width)
+			boundary = c.offset;
+	return boundary;
+}
+
+size_t text_boundary(const struct text *text, size_t offset)
+{
+	size_t line = text_line_of(text, offset), boundary = text->lines[line];
+	struct text_char c;
+
+	text_chars_init(text, line, &c);
+	if (offset >= c.end)
+		return c.end;
+	while (text_chars_next(text, &c) && c.offset <= offset)
+		if (c.width)
+			boundary = c.offset;
+	return boundary;
+}
+
+void text_chars_init(const struct text *text, size_t line, struct text_char *c)
+{
+	c->next = text->lines[line];
+	c->end = text_line_end(text, line);
+	c->column = c->width = 0;
+}
+
 /* Tabs go to the next tab stop and show nothing, other control characters show U+FFFD */
 bool text_chars_next(const struct text *text, struct text_char *c)
 {
@@ -117,7 +315,7 @@ bool text_chars_next(const struct text *text, struct text_char *c)
 		return false;
 	c->offset = c->next;
 	c->column += c->width;
-	codepoint = utf8_decode(array_ptr(text->bytes + c->offset, c->end - c->offset), &length);
+	codepoint = utf8_decode(arrview(c->offset, c->end - c->offset, array_ptr(text->bytes, text->size)), &length);
 	c->next = c->offset + length;
 	c->width = codepoint == '\t' ? TEXT_TAB - c->column % TEXT_TAB : combining(codepoint) ? 0 : 1;
 	c->codepoint = codepoint == '\t' ? ' ' : codepoint < 0x20 || codepoint == 0x7f ? TEXT_REPLACEMENT : codepoint;

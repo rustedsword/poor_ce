@@ -33,7 +33,6 @@ input_test = executable(
 	'input-test',
 	'input-test.c',
 	'input-server.c',
-	text_sources,
 	log_sources,
 	seat_sources,
 	client_protocol_h,
@@ -73,14 +72,33 @@ render_test = executable(
 	font_sources,
 	log_sources,
 	render_sources,
+	lsp_sources,
+	editor_sources,
 	shaders_h,
 	client_protocol_h,
 	dependencies: [ test_runner_dep, swapchain_dep, client_dep, poor_loop_dep, vulkan_dep, vulkan_initializers_dep,
-			freetype_dep, cc.find_library('m', required: false) ],
+			freetype_dep, xkbcommon_dep, cc.find_library('m', required: false) ],
 )
-test(
-	'render-test',
-	validation_runner,
-	args: [ validation_check, '--vulkan', vulkan_validation_probe, render_test ],
-	env: vulkan_env,
-)
+fake_lsp = executable('fake-lsp', 'fake-lsp.c', dependencies: [ poor_base_dep ])
+lsp_test = executable('lsp-test', 'lsp-test.c', text_sources, log_sources, lsp_sources,
+		      dependencies: [ test_runner_dep, poor_loop_dep, cc.find_library('m', required: false) ])
+editor_test = executable('editor-test', 'editor-test.c', text_sources, font_sources, log_sources, lsp_sources,
+			 editor_sources, client_protocol_h,
+			 dependencies: [ test_runner_dep, poor_loop_dep, client_dep, xkbcommon_dep, freetype_dep,
+					 cc.find_library('m', required: false) ])
+lsp_env = [ 'TEST_BUILD_DIR=@0@'.format(meson.current_build_dir()), 'FAKE_LSP=@0@'.format(fake_lsp.full_path()) ]
+
+# The app runs with the defer setup, its parts are tested with it and without flags
+foreach ring : [ 'default', 'defer' ]
+	test(
+		'render-test-' + ring,
+		validation_runner,
+		args: [ validation_check, '--vulkan', vulkan_validation_probe, render_test ],
+		env: vulkan_env + [ 'TEST_RING=' + ring ],
+	)
+	test('lsp-test-' + ring, lsp_test, env: lsp_env + [ 'TEST_RING=' + ring ], depends: fake_lsp)
+	test('editor-test-' + ring, editor_test, env: lsp_env + [ 'TEST_RING=' + ring ], depends: fake_lsp)
+endforeach
+
+# Input for trying the editor on a desktop, see drive.sh
+executable('fake-input', 'fake-input.c', dependencies: [ poor_base_dep ])

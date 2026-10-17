@@ -8,15 +8,14 @@
 #include <vulkan/vulkan.h>
 
 #include "atlas.h"
-#include "view.h"
+#include "quad.h"
 
 /* The pipeline draws into images of the Vulkan format of the DRM format of the swapchain */
 constexpr uint32_t RENDER_DRM_FORMAT = DRM_FORMAT_XRGB8888;
 constexpr VkFormat RENDER_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
-constexpr size_t RENDER_INSTANCES = 1 << 18;
-constexpr size_t RENDER_ROWS = 2048;
+constexpr size_t RENDER_QUADS = 1 << 18;
 
-/* How the image of a buffer of the swapchain is drawn: its glyphs, and the atlas rows that its frame uploads */
+/* How the image of a buffer of the swapchain is drawn: its quads, and the atlas rows that its frame uploads */
 struct render_target {
 	VkImageView view;
 	VkCommandBuffer commands;
@@ -47,7 +46,6 @@ struct renderer {
 	bool atlas_valid;
 	PFN_vkGetSemaphoreFdKHR get_semaphore_fd;
 	struct render_target targets[POOR_WL_SWAPCHAIN_BUFFERS];
-	VkClearRect rects[RENDER_ROWS];
 	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
 };
 
@@ -56,8 +54,11 @@ struct renderer {
 				 uint32_t *render_minor);
 /* The drawing has to be done, see renderer_idle_fence() */
 void renderer_fini(struct renderer *renderer);
-/* Draw 'view' into 'buffer'. Returns the fence of the drawing, or -1. */
-[[nodiscard]] int renderer_draw(struct renderer *renderer, struct poor_wl_swapchain_buffer *buffer, const struct view *view);
+/* Draw 'quads' over 'background', which is RGBA, into 'buffer'. Returns the fence of the drawing, or -1. */
+[[nodiscard]] int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffer *buffer, uint32_t background,
+				     size_t count, const struct quad (*quads)[count]);
+#define renderer_draw(renderer, buffer, background, quads) \
+	renderer_draw_impl(renderer, buffer, background, ARRAY_SIZE(quads), &auto_arr(quads))
 /* A fence that signals once all drawing is done, or -1 */
 [[nodiscard]] int renderer_idle_fence(struct renderer *renderer);
 

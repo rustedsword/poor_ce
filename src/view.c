@@ -11,8 +11,6 @@ void view_init(struct view *view, const struct text *text)
 	view->width = view->height = 0;
 	view->cell_width = view->cell_height = 1;
 	view->padding = 0;
-	view->scale = 120;
-	view->selecting = view->focused = false;
 }
 
 static size_t full_rows(const struct view *view)
@@ -34,9 +32,10 @@ static size_t max_top(const struct view *view)
 	return view->text->line_count > full_rows(view) ? view->text->line_count - full_rows(view) : 0;
 }
 
+/* The caret after the longest line shows too */
 static size_t max_left(const struct view *view)
 {
-	return view->text->columns > full_columns(view) ? view->text->columns - full_columns(view) : 0;
+	return view->text->columns + 1 > full_columns(view) ? view->text->columns + 1 - full_columns(view) : 0;
 }
 
 static size_t step(size_t value, ptrdiff_t delta, size_t max)
@@ -87,6 +86,24 @@ bool view_scroll(struct view *view, ptrdiff_t lines, ptrdiff_t columns)
 	view->top = top;
 	view->left = left;
 	return changed;
+}
+
+bool view_reveal(struct view *view, size_t offset)
+{
+	size_t line = text_line_of(view->text, offset), column = text_column_of(view->text, line, offset);
+	size_t rows = full_rows(view), columns = full_columns(view);
+	bool changed = view_scroll(view, 0, 0);
+	ptrdiff_t lines = 0, shift = 0;
+
+	if (line < view->top)
+		lines = -(ptrdiff_t)(view->top - line);
+	else if (line >= view->top + rows)
+		lines = line - (view->top + rows - 1);
+	if (column < view->left)
+		shift = -(ptrdiff_t)(view->left - column);
+	else if (column >= view->left + columns)
+		shift = column - (view->left + columns - 1);
+	return view_scroll(view, lines, shift) || changed;
 }
 
 size_t view_hit(const struct view *view, double x, double y)

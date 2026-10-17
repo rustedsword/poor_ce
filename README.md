@@ -1,27 +1,23 @@
 # poor_wayland_text_viewer
 
-A text viewer on [poor_wayland](https://github.com/rustedsword/poor_wayland) and
-[poor_wayland_swapchain](https://github.com/rustedsword/poor_wayland_swapchain):
-it shows a UTF-8 file in an xdg-shell window, drawn with Vulkan on the GPU of
-the compositor and presented with explicit synchronization. Text is selected
-with the pointer, which makes it the primary selection, and Ctrl+C copies it to
-the clipboard. The wheel and the arrows, PageUp, PageDown, Space, Home and End
-scroll, Ctrl+A selects all, Escape clears the selection and Ctrl+Q quits. The
-pointer is an I-beam through cursor-shape-v1, the compositor draws the
-decorations if it has xdg-decoration, and fractional scaling goes through the
-viewport.
+An ultra simple editor for C projects: a file tree, tabs, highlighting of C and going to definitions through clangd.
+It runs on [poor_wayland](https://github.com/rustedsword/poor_wayland) and
+[poor_wayland_swapchain](https://github.com/rustedsword/poor_wayland_swapchain), draws with Vulkan and does all of
+its I/O through io_uring. The keys show in its window while no file is open.
 
-Everything runs on io_uring through poor_loop, reading the file included. The
-font is Noto Sans Mono, embedded with `#embed` and drawn with FreeType.
+## Build
 
-It needs Linux 6.16 or newer, a compositor with linux-dmabuf 4 and
-linux-drm-syncobj-v1, a Vulkan 1.4 driver, a C23 compiler, xkbcommon, FreeType
-and glslangValidator. Installed poor_wayland, poor_wayland_swapchain and
-wayland-protocols are used if there are, the submodules otherwise.
+It needs Linux 6.16, liburing 2.12, a compositor with linux-dmabuf 4 and linux-drm-syncobj-v1, a Vulkan 1.4 driver, a
+C23 compiler, xkbcommon, FreeType and glslangValidator. The submodules are used for what isn't installed.
 
     $ meson setup build/
     $ ninja -C build/
-    $ build/src/poor_text_viewer FILE
 
-The font is licensed under the SIL Open Font License, see
-[data/OFL.txt](data/OFL.txt).
+## Run
+
+    $ build/src/poor_text_viewer [DIRECTORY] [FILE]...
+
+The directory, the current one by default, is the project. clangd, if it is installed, finds its
+`compile_commands.json` there or in `build/`.
+
+The font is Noto Sans Mono, licensed under the SIL Open Font License, see [data/OFL.txt](data/OFL.txt).

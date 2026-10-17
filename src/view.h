@@ -9,7 +9,7 @@
 
 /*
  * The part of a text that shows in 'width' x 'height' buffer pixels, from line 'top' and column 'left', and the
- * selection between 'anchor' and 'caret'. 'scale' is in 120ths of a buffer pixel per surface unit.
+ * selection between 'anchor' and 'caret'
  */
 struct view {
 	const struct text *text;
@@ -18,8 +18,6 @@ struct view {
 	int32_t width, height;
 	int32_t cell_width, cell_height;
 	int32_t padding;
-	uint32_t scale;
-	bool selecting, focused;
 };
 
 void view_init(struct view *view, const struct text *text);
@@ -30,6 +28,8 @@ size_t view_rows(const struct view *view);
 size_t view_columns(const struct view *view);
 size_t view_page(const struct view *view);
 bool view_scroll(struct view *view, ptrdiff_t lines, ptrdiff_t columns);
+/* Scroll as little as it takes for the character boundary 'offset' to show */
+bool view_reveal(struct view *view, size_t offset);
 /* The character boundary next to buffer pixel 'x', 'y' */
 size_t view_hit(const struct view *view, double x, double y);
 bool view_select(struct view *view, size_t anchor, size_t caret);
