@@ -318,6 +318,7 @@ static void dispatch(struct lsp *lsp, size_t size, const char (*body)[size])
 		post(lsp);
 		set_state(lsp, LSP_STOPPING);
 		close_writer(lsp, false);
+		poor_loop_timer_arm(lsp->loop, &lsp->timer, poor_loop_now() + LSP_EXIT_NS);
 	} else if ((uint64_t)number == lsp->highlight_id) {
 		highlighted(lsp, size, body, root);
 	} else {
@@ -718,7 +719,10 @@ bool lsp_token(struct lsp *lsp, const struct text *text, struct lsp_token *token
 	}
 }
 
-/* A server that doesn't exit in time is killed */
+/*
+ * A server that doesn't answer the shutdown in time is killed, and so is one that doesn't exit soon after it: clangd
+ * would finish its work in the background first.
+ */
 void lsp_stop(struct lsp *lsp)
 {
 	if (lsp->stopping)

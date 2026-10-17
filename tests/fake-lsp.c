@@ -18,7 +18,7 @@
  * Messages that are too big for it are skipped. With "hang" it doesn't
  * shut down. With "orphan" it exits once it is asked to initialize, a child of it answers later. With "linger" a child
  * of it holds its output for a while after it exits. With "slow" it waits half a second before it reads a message that
- * is bigger than 1 MiB.
+ * is bigger than 1 MiB. With "stay" it stays for a while after it is told to exit.
  */
 static char message[1 << 16];
 static char root[4096];
@@ -145,7 +145,7 @@ static long id(void)
 int main(int argc, char **argv)
 {
 	bool hang = argc > 1 && !strcmp(argv[1], "hang"), orphan = argc > 1 && !strcmp(argv[1], "orphan");
-	bool linger = argc > 1 && !strcmp(argv[1], "linger"), asked = false;
+	bool linger = argc > 1 && !strcmp(argv[1], "linger"), stay = argc > 1 && !strcmp(argv[1], "stay"), asked = false;
 
 	slow = argc > 1 && !strcmp(argv[1], "slow");
 	char body[8192];
@@ -196,6 +196,8 @@ int main(int argc, char **argv)
 			snprintf_array(body, "{\"jsonrpc\":\"2.0\",\"id\":%ld,\"result\":null}", id());
 			respond(body);
 		} else if (!strcmp(method(), "exit")) {
+			if (stay)
+				sleep(5);
 			return 0;
 		} else if (strstr(message, "\"id\":\"question\"") && !strstr(message, "\"result\":null")) {
 			return 1;

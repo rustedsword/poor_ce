@@ -14,6 +14,7 @@
 constexpr size_t LSP_OUT_BYTES = 24 << 20;
 constexpr size_t LSP_IN_BYTES = 1 << 20;
 constexpr uint64_t LSP_STOP_NS = 2'000'000'000;
+constexpr uint64_t LSP_EXIT_NS = 100'000'000;
 constexpr size_t LSP_LEGEND = 64;
 
 poor_loop_fd_declare(lsp_output);

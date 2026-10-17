@@ -291,6 +291,27 @@ TEST(lsp_leaves_what_the_server_left)
 	loop_fini(&loop);
 }
 
+/* A server that stays after it is told to exit is killed soon, long before one that doesn't answer the shutdown */
+TEST(lsp_ends_servers_that_stay)
+{
+	static struct lsp lsp;
+	const char *argv[] = { server(), "stay", nullptr };
+	struct poor_loop loop;
+	uint64_t start;
+
+	loop_init(&loop);
+	log_init(&loop, "lsp-test");
+	lsp_init(&lsp, &loop, &listener, &memory);
+	lsp_start(&lsp, "/", argv);
+	run_until(&loop, lsp.state == LSP_READY);
+	start = poor_loop_now();
+	lsp_stop(&lsp);
+	run_until(&loop, !lsp_busy(&lsp));
+	assert(lsp.state == LSP_EXITED && poor_loop_now() - start < LSP_STOP_NS / 2);
+	run_until(&loop, !log_pending());
+	loop_fini(&loop);
+}
+
 /* A server that isn't there is off, one that doesn't shut down is killed */
 TEST(lsp_fails)
 {
