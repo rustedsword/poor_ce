@@ -83,7 +83,7 @@ static void retitle(struct editor *editor)
 {
 	struct editor_tab *tab = editor_tab(editor);
 
-	snprintf_array(editor->title, "%s%spoor_text_viewer", tab ? path_name(tab->path) : "", tab ? " - " : "");
+	snprintf_array(editor->title, "%s%sce", tab ? path_name(tab->path) : "", tab ? " - " : "");
 	editor->listener->title(editor, editor->title);
 }
 

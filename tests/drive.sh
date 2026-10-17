@@ -19,7 +19,7 @@ $geometry
 GEOMETRY
 
 # The editor is the window of the one process of it
-pid=$(pidof poor_text_viewer || true)
+pid=$(pidof ce || true)
 case $pid in
 '' | *' '*)
 	echo "drive.sh: one editor has to run, not '$pid'" >&2
@@ -39,7 +39,7 @@ scale=$(echo "$outputs" | awk -v x="$x" -v y="$y" '
 
 cat >"$work/raise.js" <<SCRIPT
 for (const window of workspace.windowList()) {
-	if (window.resourceClass == "poor_text_viewer" && window.pid == $pid) {
+	if (window.resourceClass == "ce" && window.pid == $pid) {
 		window.minimized = false;
 		window.frameGeometry = { x: $x, y: $y, width: $width, height: $height };
 		workspace.activeWindow = window;
@@ -48,7 +48,7 @@ for (const window of workspace.windowList()) {
 SCRIPT
 cat >"$work/check.js" <<SCRIPT
 const window = workspace.activeWindow;
-if (window && window.resourceClass == "poor_text_viewer" && window.pid == $pid)
+if (window && window.resourceClass == "ce" && window.pid == $pid)
 	callDBus("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", "loadScript", "$work/marker.js", "drive-active");
 SCRIPT
 : >"$work/marker.js"

@@ -137,7 +137,7 @@ static bool post(struct lsp *lsp)
 	char header[HEADER_BYTES];
 
 	if (lsp->message.overflow) {
-		log_printf("poor_text_viewer: a message to %s doesn't fit\n", lsp->argv[0]);
+		log_printf("ce: a message to %s doesn't fit\n", lsp->argv[0]);
 		return false;
 	}
 	length = snprintf_array(header, "Content-Length: %zu\r\n\r\n", size);
@@ -203,7 +203,7 @@ static void initialize(struct lsp *lsp)
 
 	lsp->initialize_id = lsp->next_id++;
 	writer = request(lsp, lsp->initialize_id, "initialize");
-	json_printf(writer, ",\"params\":{\"processId\":%d,\"clientInfo\":{\"name\":\"poor_text_viewer\"},\"rootUri\":", getpid());
+	json_printf(writer, ",\"params\":{\"processId\":%d,\"clientInfo\":{\"name\":\"ce\"},\"rootUri\":", getpid());
 	uri(writer, lsp->root);
 	json_printf(writer, ",\"capabilities\":{\"general\":{\"positionEncodings\":[\"utf-8\",\"utf-16\"]},"
 			    "\"workspace\":{\"semanticTokens\":{\"refreshSupport\":true}},"
@@ -237,7 +237,7 @@ static void initialized(struct lsp *lsp, size_t size, const char (*body)[size], 
 	struct json result, capabilities, encoding, sync, save, text;
 
 	if (!json_member(body, root, "result", &result)) {
-		log_printf("poor_text_viewer: %s didn't start\n", lsp->argv[0]);
+		log_printf("ce: %s didn't start\n", lsp->argv[0]);
 		lsp_stop(lsp);
 		return;
 	}
@@ -421,7 +421,7 @@ static void on_wait(struct poor_loop *, struct poor_loop_op *op, const struct io
 	lsp->running = false;
 	poor_loop_timer_disarm(&lsp->timer);
 	if (!lsp->stopping)
-		log_printf("poor_text_viewer: %s exited\n", lsp->argv[0]);
+		log_printf("ce: %s exited\n", lsp->argv[0]);
 	close_writer(lsp, true);
 	if (lsp->read_op.pending)
 		io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(lsp->loop)), &lsp->read_op, 0);
@@ -466,7 +466,7 @@ static void spawn(struct lsp *lsp)
 	poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[0][0], 0);
 	poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[1][1], 0);
 	if (ret) {
-		log_printf("poor_text_viewer: %s: %s\n", lsp->argv[0], strerror(ret));
+		log_printf("ce: %s: %s\n", lsp->argv[0], strerror(ret));
 		poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[0][1], 0);
 		poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[1][0], 0);
 		set_state(lsp, LSP_OFF);
@@ -490,7 +490,7 @@ static void on_pipe(struct poor_loop *, struct poor_loop_op *op, const struct io
 	struct lsp *lsp = container_of(op, struct lsp, pipe_op);
 
 	if (cqe->res < 0)
-		log_printf("poor_text_viewer: pipe: %s\n", strerror(-cqe->res));
+		log_printf("ce: pipe: %s\n", strerror(-cqe->res));
 	else
 		lsp->pipes_made++;
 	if (cqe->res >= 0 && lsp->pipes_made < 2 && !lsp->stopping) {

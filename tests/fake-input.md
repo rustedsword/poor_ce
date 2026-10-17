@@ -46,7 +46,7 @@ Key names: letters, digits, `f1`-`f12`, `ctrl`, `shift`, `alt`, `altgr`, `super`
 
 ## Example
 
-    $ build/src/poor_text_viewer . &
+    $ build/src/ce . &
     $ tests/drive.sh /tmp/shot.png                    # look where things are
     $ tests/drive.sh /tmp/shot.png click 133 463      # open a file in the tree
     $ tests/drive.sh /tmp/shot.png down ctrl click 1510 1027 up ctrl sleep 1500

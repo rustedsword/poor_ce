@@ -14,7 +14,7 @@ test_runner = static_library(
 
 test_runner_dep = declare_dependency(
 	link_with: test_runner,
-	include_directories: viewer_inc,
+	include_directories: ce_inc,
 	dependencies: [
 		dependency('threads'),
 		cc.find_library('dl', required: false),

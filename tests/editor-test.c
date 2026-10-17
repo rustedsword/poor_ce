@@ -182,7 +182,7 @@ TEST(editor_saves)
 	snprintf_array(project.path, "%s/main.c", project.root);
 	editor_open(&editor, project.path);
 	tab = loaded(&editor, &loop);
-	assert(tab->document.code && editor.tab_count == 1 && !strcmp(editor.title, "main.c - poor_text_viewer"));
+	assert(tab->document.code && editor.tab_count == 1 && !strcmp(editor.title, "main.c - ce"));
 	type(&editor, XKB_KEY_End, 0, "");
 	type(&editor, XKB_KEY_space, 0, " ");
 	type(&editor, XKB_KEY_x, 0, "x");

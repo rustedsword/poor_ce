@@ -23,7 +23,7 @@ static bool check(VkResult result, const char *what)
 {
 	if (result >= 0)
 		return true;
-	log_printf("poor_text_viewer: %s: %d\n", what, result);
+	log_printf("ce: %s: %d\n", what, result);
 	return false;
 }
 
@@ -62,7 +62,7 @@ static bool buffer_init(struct renderer *renderer, VkDeviceSize size, VkBufferUs
 	allocate.memoryTypeIndex = memory_type(renderer, requirements.memoryRequirements.memoryTypeBits,
 					       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	if (allocate.memoryTypeIndex == UINT32_MAX) {
-		log_printf("poor_text_viewer: no host visible memory\n");
+		log_printf("ce: no host visible memory\n");
 		return false;
 	}
 	return check(vkAllocateMemory(renderer->device, &allocate, nullptr, memory), "vkAllocateMemory") &&
@@ -179,7 +179,7 @@ static bool device_exports_fences(VkPhysicalDevice physical)
 static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t device, uint32_t *render_minor)
 {
 	static const float priority = 1.0f;
-	auto application = xVkApplicationInfo(.pApplicationName = "poor_text_viewer", .apiVersion = VK_API_VERSION_1_4);
+	auto application = xVkApplicationInfo(.pApplicationName = "ce", .apiVersion = VK_API_VERSION_1_4);
 	auto properties = xVkPhysicalDeviceProperties2();
 
 	/* Mesa's device-select layer would connect to the compositor with the system libwayland and block, to sort GPUs */
@@ -194,7 +194,7 @@ static bool device_init(struct renderer *renderer, struct poor_loop *loop, dev_t
 	}
 	if (!renderer->physical || properties.properties.apiVersion < VK_API_VERSION_1_4 ||
 	    !device_queue_family(renderer->physical, &renderer->family) || !device_exports_fences(renderer->physical)) {
-		log_printf("poor_text_viewer: no Vulkan 1.4 device with dmabufs, modifiers and fences for %u:%u\n", major(device),
+		log_printf("ce: no Vulkan 1.4 device with dmabufs, modifiers and fences for %u:%u\n", major(device),
 			   minor(device));
 		return false;
 	}
@@ -587,7 +587,7 @@ int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffe
 
 	assert(count <= RENDER_QUADS);
 	if (vkGetFenceStatus(renderer->device, target->done) != VK_SUCCESS) {
-		log_printf("poor_text_viewer: a buffer came back before its drawing was done\n");
+		log_printf("ce: a buffer came back before its drawing was done\n");
 		return -1;
 	}
 	copy_array(arrview_first(count, (struct quad (*)[RENDER_QUADS])target->instance_map), quads);

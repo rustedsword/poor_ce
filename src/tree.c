@@ -194,7 +194,7 @@ static bool add(struct tree *tree, const struct dirent64 *entry)
 	size_t length = strlen(entry->d_name) + 1;
 
 	if (tree->node_count == TREE_NODES || TREE_NAMES - tree->names_used < length || directory->depth == UINT8_MAX) {
-		log_printf("poor_text_viewer: %s: too many files\n", tree->path);
+		log_printf("ce: %s: too many files\n", tree->path);
 		return false;
 	}
 	copy_array(arrview(tree->names_used, length, array_ptr(tree->names, TREE_NAMES)), array_ptr(entry->d_name, length));
@@ -235,7 +235,7 @@ static void read_entries(struct tree *tree)
 		}
 	}
 	if (size < 0)
-		log_printf("poor_text_viewer: %s: %s\n", tree->path, strerror(errno));
+		log_printf("ce: %s: %s\n", tree->path, strerror(errno));
 }
 
 /* Links, and entries of unknown type, are what they point to */
@@ -287,7 +287,7 @@ static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io
 		return;
 	}
 	if (cqe->res < 0) {
-		log_printf("poor_text_viewer: %s: %s\n", tree->path, strerror(-cqe->res));
+		log_printf("ce: %s: %s\n", tree->path, strerror(-cqe->res));
 		tree->block = tree->node_count;
 		tree->block_count = 0;
 		finish(tree);
@@ -456,7 +456,7 @@ void tree_init(struct tree *tree, struct poor_loop *loop, const char *root, cons
 	};
 	fd = inotify_init1(IN_CLOEXEC);
 	if (fd < 0) {
-		log_printf("poor_text_viewer: inotify: %s\n", strerror(errno));
+		log_printf("ce: inotify: %s\n", strerror(errno));
 	} else {
 		poor_loop_fd_init(&tree->watches, fd);
 		tree->watching = true;

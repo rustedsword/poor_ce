@@ -169,7 +169,7 @@ static void app_layout(struct app *app)
 
 	if (pixels != app->font_pixels) {
 		if (!font_resize(&app->font, pixels)) {
-			log_printf("poor_text_viewer: no font of %u pixels\n", pixels);
+			log_printf("ce: no font of %u pixels\n", pixels);
 			app_quit(app, 1);
 			return;
 		}
@@ -278,7 +278,7 @@ static void start(struct app *app, bool directory)
 	char root[PATH_MAX];
 
 	if (!path_join(root, app->cwd, directory ? app->paths[0] : ".")) {
-		log_printf("poor_text_viewer: %s is too long\n", app->paths[0]);
+		log_printf("ce: %s is too long\n", app->paths[0]);
 		app_quit(app, 1);
 		return;
 	}
@@ -287,7 +287,7 @@ static void start(struct app *app, bool directory)
 		if (path_join(app->path, app->cwd, *path))
 			editor_open(&editor, app->path);
 		else
-			log_printf("poor_text_viewer: %s is too long\n", *path);
+			log_printf("ce: %s is too long\n", *path);
 	}
 }
 
@@ -311,18 +311,18 @@ static void on_node(struct poor_loop *, struct poor_loop_op *op, const struct io
 		return;
 	}
 	if (cqe->res < 0) {
-		log_printf("poor_text_viewer: %s: %s\n", app->node_path, strerror(-cqe->res));
+		log_printf("ce: %s: %s\n", app->node_path, strerror(-cqe->res));
 		app_quit(app, 1);
 		return;
 	}
 	app->drm_fd = cqe->res;
 	ret = poor_wl_swapchain_set_syncobj(&app->swapchain, &app->syncobj, app->drm_fd);
 	if (ret < 0) {
-		log_printf("poor_text_viewer: no explicit synchronization: %s\n", strerror(-ret));
+		log_printf("ce: no explicit synchronization: %s\n", strerror(-ret));
 		app_quit(app, 1);
 		return;
 	}
-	log_printf("poor_text_viewer: %s\n", app->renderer.device_name);
+	log_printf("ce: %s\n", app->renderer.device_name);
 	poor_wl_swapchain_set_allocator(&app->swapchain, &renderer_allocator, &app->renderer);
 }
 
@@ -332,7 +332,7 @@ static void swapchain_device(struct poor_wl_swapchain *swapchain, dev_t device)
 	uint32_t render_minor;
 
 	if (app->have_renderer) {
-		log_printf("poor_text_viewer: the compositor moved to another GPU\n");
+		log_printf("ce: the compositor moved to another GPU\n");
 		app_quit(app, 1);
 		return;
 	}
@@ -370,7 +370,7 @@ static void swapchain_frame(struct poor_wl_swapchain *swapchain, struct poor_wl_
 
 static void swapchain_error(struct poor_wl_swapchain *swapchain, int error)
 {
-	log_printf("poor_text_viewer: swapchain: %s\n", strerror(error));
+	log_printf("ce: swapchain: %s\n", strerror(error));
 	app_quit(app_of_swapchain(swapchain), 1);
 }
 
@@ -537,7 +537,7 @@ static void window_init(struct app *app)
 	poor_xdg_surface_get_toplevel(&app->shell_surface, &app->toplevel);
 	poor_xdg_toplevel_add_listener(&app->toplevel, &toplevel_listener, app);
 	poor_xdg_toplevel_set_title(&app->toplevel, editor.title);
-	poor_xdg_toplevel_set_app_id(&app->toplevel, "poor_text_viewer");
+	poor_xdg_toplevel_set_app_id(&app->toplevel, "ce");
 	if (app->have_decoration_manager) {
 		poor_zxdg_decoration_manager_v1_get_toplevel_decoration(&app->decoration_manager, &app->decoration, &app->toplevel);
 		poor_zxdg_toplevel_decoration_v1_add_listener(&app->decoration, &decoration_listener, app);
@@ -562,7 +562,7 @@ static void synced(void *data, struct poor_wl_callback *callback, uint32_t)
 
 	poor_wl_callback_destroy(callback);
 	if (!app->have_compositor || !app->have_dmabuf || !app->have_syncobj || !app->have_wm_base) {
-		log_printf("poor_text_viewer: the compositor has no wl_compositor 4, zwp_linux_dmabuf_v1 4, "
+		log_printf("ce: the compositor has no wl_compositor 4, zwp_linux_dmabuf_v1 4, "
 			   "wp_linux_drm_syncobj_manager_v1 or xdg_wm_base\n");
 		app_quit(app, 1);
 		return;
@@ -588,9 +588,9 @@ static void display_error(struct poor_wl_display *display)
 
 	if (error == EPROTO) {
 		code = poor_wl_display_get_protocol_error(display, &interface, &id);
-		log_printf("poor_text_viewer: protocol error %u on %s#%u\n", code, interface ? interface->name : "[unknown]", id);
+		log_printf("ce: protocol error %u on %s#%u\n", code, interface ? interface->name : "[unknown]", id);
 	} else {
-		log_printf("poor_text_viewer: connection: %s\n", strerror(error));
+		log_printf("ce: connection: %s\n", strerror(error));
 	}
 	app_quit(app, 1);
 }
@@ -606,7 +606,7 @@ POOR_LOOP_GROUP_OP(on_signal, loop, file, op, cqe)
 	struct app *app = container_of(file, struct app, signals);
 
 	if (cqe->res == sizeof(app->siginfo))
-		log_printf("poor_text_viewer: %s\n", strsignal(app->siginfo.ssi_signo));
+		log_printf("ce: %s\n", strsignal(app->siginfo.ssi_signo));
 	sigprocmask(SIG_UNBLOCK, &app->sigset, nullptr);
 	app_quit(app, 0);
 }
@@ -651,22 +651,22 @@ static void app_prepare(struct app *app)
 	app->paths = *paths;
 	app->path_count = count;
 	if (!getcwd(app->cwd, sizeof(app->cwd))) {
-		log_printf("poor_text_viewer: getcwd: %s\n", strerror(errno));
+		log_printf("ce: getcwd: %s\n", strerror(errno));
 		return -1;
 	}
 	app->have_font = font_init(&app->font, FONT_SIZE);
 	if (!app->have_font) {
-		log_printf("poor_text_viewer: the font failed\n");
+		log_printf("ce: the font failed\n");
 		return -1;
 	}
 	app->font_pixels = FONT_SIZE;
 	atlas_init(&atlas, &app->font);
 	if (!seat_init(&app->seat, &app->loop, &seat_listener, &seat_memory)) {
-		log_printf("poor_text_viewer: no xkbcommon context\n");
+		log_printf("ce: no xkbcommon context\n");
 		return -1;
 	}
 	if (poor_wl_display_connect(&app->display, &app->loop, &memory, nullptr, display_error, display_done) < 0) {
-		log_printf("poor_text_viewer: can't connect: %s\n", strerror(errno));
+		log_printf("ce: can't connect: %s\n", strerror(errno));
 		seat_fini(&app->seat);
 		return -1;
 	}
@@ -688,7 +688,7 @@ static void app_prepare(struct app *app)
 	sigprocmask(SIG_BLOCK, &app->sigset, nullptr);
 	fd = signalfd(-1, &app->sigset, SFD_CLOEXEC);
 	if (fd < 0) {
-		log_printf("poor_text_viewer: signalfd: %s\n", strerror(errno));
+		log_printf("ce: signalfd: %s\n", strerror(errno));
 		app_quit(app, 1);
 		return 0;
 	}
@@ -715,7 +715,7 @@ static int app_finish(struct app *app)
 		font_fini(&app->font);
 	poor_loop_exit(&app->loop);
 	if (ret) {
-		dprintf(STDERR_FILENO, "poor_text_viewer: io_uring: %s\n", strerror(-ret));
+		dprintf(STDERR_FILENO, "ce: io_uring: %s\n", strerror(-ret));
 		return 1;
 	}
 	return app->status;
@@ -728,14 +728,14 @@ int main(int argc, char **argv)
 	ret = poor_loop_init(&app.loop, 64,
 			     &(struct io_uring_params){ .flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN });
 	if (ret) {
-		dprintf(STDERR_FILENO, "poor_text_viewer: io_uring: %s\n", strerror(-ret));
+		dprintf(STDERR_FILENO, "ce: io_uring: %s\n", strerror(-ret));
 		return 1;
 	}
-	log_init(&app.loop, "poor_text_viewer");
+	log_init(&app.loop, "ce");
 	poor_wl_log_set_handler_client(log_vprintf);
 	app_prepare(&app);
 	if (argc > 1 && argv[1][0] == '-') {
-		log_printf("usage: poor_text_viewer [DIRECTORY] [FILE]...\n");
+		log_printf("usage: ce [DIRECTORY] [FILE]...\n");
 		app.status = 2;
 		return app_finish(&app);
 	}
@@ -745,7 +745,7 @@ int main(int argc, char **argv)
 	}
 	ret = poor_loop_run(&app.loop);
 	if (ret) {
-		dprintf(STDERR_FILENO, "poor_text_viewer: io_uring: %s\n", strerror(-ret));
+		dprintf(STDERR_FILENO, "ce: io_uring: %s\n", strerror(-ret));
 		return 1;
 	}
 	return app_finish(&app);

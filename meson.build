@@ -1,5 +1,5 @@
 project(
-	'poor_wayland_text_viewer', 'c',
+	'poor_ce', 'c',
 	version: '0.1.0',
 	license: 'MIT',
 	meson_version: '>= 1.4.0',

@@ -60,7 +60,7 @@ static void transfer_start(struct seat_source *source, int32_t fd)
 		transfer_write(transfer);
 		return;
 	}
-	log_printf("poor_text_viewer: too many pastes at once\n");
+	log_printf("ce: too many pastes at once\n");
 	poor_loop_close_fd_or_submit(seat->loop, fd, 0);
 }
 
@@ -132,7 +132,7 @@ bool seat_copy_impl(struct seat *seat, bool primary, size_t size, const char (*b
 	if (!size || !(primary ? seat->have_primary_device : seat->have_data_device))
 		return false;
 	if (size > SEAT_BYTES || source->transfers[copy]) {
-		log_printf("poor_text_viewer: no room to copy %zu bytes\n", size);
+		log_printf("ce: no room to copy %zu bytes\n", size);
 		return false;
 	}
 	copy_array(arrview_first(size, (*source->bytes)[copy]), bytes);
@@ -302,7 +302,7 @@ POOR_LOOP_GROUP_OP(paste_on_read, loop, file, op, cqe)
 		return;
 	}
 	if (paste->size == ARRAY_SIZE(paste->bytes))
-		log_printf("poor_text_viewer: the paste is cut off after %zu bytes\n", paste->size);
+		log_printf("ce: the paste is cut off after %zu bytes\n", paste->size);
 	seat->listener->paste(seat, paste->size, arrview_first(paste->size, paste->bytes));
 }
 
@@ -593,7 +593,7 @@ static void keyboard_keymap(void *data, struct poor_wl_keyboard *, uint32_t form
 		munmap_array(map);
 	}
 	if (!keymap) {
-		log_printf("poor_text_viewer: the keymap of the compositor is not usable\n");
+		log_printf("ce: the keymap of the compositor is not usable\n");
 		return;
 	}
 	xkb_state_unref(seat->state);
@@ -838,7 +838,7 @@ struct poor_wl_proxy *seat_new_proxy(struct seat *seat, const struct poor_wl_int
 		offer->primary = !data;
 		return data ? &offer->data.proxy : &offer->primary_offer.proxy;
 	}
-	log_printf("poor_text_viewer: too many offers\n");
+	log_printf("ce: too many offers\n");
 	return nullptr;
 }
 
