@@ -5,6 +5,8 @@ It runs on [poor_wayland](https://github.com/rustedsword/poor_wayland) and
 [poor_wayland_swapchain](https://github.com/rustedsword/poor_wayland_swapchain), draws with Vulkan and does all of
 its I/O through io_uring. The keys show in its window while no file is open.
 
+![ce with a small C project](data/screenshot.png)
+
 ## Build
 
 It needs Linux 6.16, liburing 2.12, a compositor with linux-dmabuf 4 and linux-drm-syncobj-v1, a Vulkan 1.4 driver, a

@@ -4,11 +4,13 @@
 #
 #   tests/drive.sh CAPTURE.png [COMMAND...]
 #
-# BUILD is the build directory, GEOMETRY is X,Y,WIDTH,HEIGHT of the window frame in logical pixels.
+# BUILD is the build directory, GEOMETRY is X,Y,WIDTH,HEIGHT of the window frame in logical pixels. BORDER=0 takes
+# the decoration off the window.
 set -eu
 
 build=${BUILD:-build}
 geometry=${GEOMETRY:-0,0,1280,800}
+noborder=$([ "${BORDER:-1}" = 0 ] && echo true || echo false)
 capture=$1
 shift
 work=$(mktemp -d)
@@ -41,6 +43,7 @@ cat >"$work/raise.js" <<SCRIPT
 for (const window of workspace.windowList()) {
 	if (window.resourceClass == "ce" && window.pid == $pid) {
 		window.minimized = false;
+		window.noBorder = $noborder;
 		window.frameGeometry = { x: $x, y: $y, width: $width, height: $height };
 		workspace.activeWindow = window;
 	}
