@@ -71,6 +71,7 @@ glslang = find_program('glslangValidator', native: true)
 
 root_inc = include_directories('.')
 
+subdir('data')
 subdir('src')
 
 if get_option('tests')

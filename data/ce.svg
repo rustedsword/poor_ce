@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>ce: After dark</title>
+  <desc>A dark potato with an angular acid-green C.</desc>
+  <g transform="translate(64 64) scale(1.12) translate(-64 -64)">
+    <path d="M 28,29 C 16,39 19,51 13,67 C 5,88 22,110 44,115
+      C 67,122 87,105 106,89 C 123,73 116,47 104,33
+      C 93,19 78,20 64,13 C 46,5 35,12 28,29 Z"
+          fill="#171e18" stroke="#b9f500" stroke-width="3"/>
+    <path d="M 69,36 H 47 L 36,47 V 79 L 47,90 H 69 V 79 H 52 L 47,74 V 52 L 52,47 H 69 Z"
+          transform="translate(11 1)" fill="#c5ff00"/>
+    <g fill="#586b2c">
+      <circle cx="30" cy="88" r="2.5"/>
+      <circle cx="87" cy="32" r="2.5"/>
+      <circle cx="71" cy="101" r="2"/>
+    </g>
+  </g>
+</svg>

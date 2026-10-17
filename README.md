@@ -12,6 +12,7 @@ C23 compiler, xkbcommon, FreeType and glslangValidator. The submodules are used 
 
     $ meson setup build/
     $ ninja -C build/
+    $ meson install -C build/ --skip-subprojects
 
 ## Run
 

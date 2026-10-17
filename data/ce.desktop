@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ce
+GenericName=C Editor
+Comment=Edit C projects
+Exec=ce %F
+Icon=ce
+Terminal=false
+Categories=Development;TextEditor;
+MimeType=text/plain;text/x-csrc;text/x-chdr;
+Keywords=code;programming;
