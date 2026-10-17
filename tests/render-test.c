@@ -333,8 +333,8 @@ static bool teal(uint32_t pixel)
 }
 
 /*
- * The editor with the tree of a directory and a C file in a tab: the panels are gray, the caret is black at the start
- * of the line it stands out on, and types are teal.
+ * The editor with the tree of a directory and a C file in a tab: the panels and the caret have the colors of the theme,
+ * the caret is at the start of the line it stands out on, and types are teal.
  */
 TEST(render_editor)
 {
@@ -368,9 +368,9 @@ TEST(render_editor)
 	snapshot(320, 640, pixels);
 	x = editor.text_rect.x + editor.padding;
 	y = editor.text_rect.y + editor.padding;
-	assert(near((*pixels)[300 - 2 * target.font.cell_height][2], 0xf3f3f3) && near((*pixels)[318][638], 0xf3f3f3));
-	assert(near((*pixels)[y + target.font.cell_height / 2][x], 0x000000));
-	assert(near((*pixels)[y + target.font.cell_height / 2][630], 0xf2f2f2));
+	assert(near((*pixels)[300 - 2 * target.font.cell_height][2], THEME_PANEL) && near((*pixels)[318][638], THEME_PANEL));
+	assert(near((*pixels)[y + target.font.cell_height / 2][x], THEME_CARET));
+	assert(near((*pixels)[y + target.font.cell_height / 2][630], THEME_CURRENT_LINE));
 	assert(cell_has(320, 640, pixels, x + target.font.cell_width, y, &target.font, teal));
 	editor_stop(&editor);
 	run_until(&loop, !editor_busy(&editor));

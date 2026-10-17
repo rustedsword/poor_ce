@@ -2,3 +2,8 @@ option('tests',
   description: 'Compile the tests',
   type: 'boolean',
   value: true)
+option('theme',
+  description: 'Colors of the editor',
+  type: 'combo',
+  choices: ['black', 'white'],
+  value: 'black')

@@ -5,9 +5,9 @@
 #include "atlas.h"
 #include "editor.h"
 #include "quad.h"
+#include "theme.h"
 
-/* The color that the scene goes over */
-constexpr uint32_t SCENE_BACKGROUND = QUAD_RGB(0xffffff);
+constexpr uint32_t SCENE_BACKGROUND = QUAD_RGB(THEME_BACKGROUND);
 
 /* The quads of everything that shows, how many of them there are. A full atlas starts over once. */
 size_t scene_build_impl(const struct editor *editor, struct atlas *atlas, size_t capacity, struct quad (*quads)[capacity]);

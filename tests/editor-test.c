@@ -931,7 +931,7 @@ TEST(editor_hides_far_caret)
 	count = scene_build(&editor, &atlas, quads);
 	assert(count < ARRAY_SIZE(quads));
 	foreach_array_const_ref(arrview_first(count, quads), quad)
-		assert(quad->u != QUAD_SOLID || quad->color != QUAD_RGB(0x000000));
+		assert(quad->u != QUAD_SOLID || quad->color != QUAD_RGB(THEME_CARET));
 	stop(&editor, &loop);
 	font_fini(&font);
 	project_fini(&project);
