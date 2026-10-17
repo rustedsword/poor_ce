@@ -122,6 +122,37 @@ TEST(text_prefixes)
 	assert(!text_prefix(text, 0, 3, wide) && text_is(text, "ab\r\n\ncd\ne"));
 }
 
+static bool marked(const struct text *text, size_t count, const size_t (*lines)[count])
+{
+	if (text->line_count != count)
+		return false;
+	foreach_array_index(*lines, line)
+		if (text_marked_line(text, line) != (*lines)[line])
+			return false;
+	return true;
+}
+
+/* Lines before and after all those that edits changed since the mark know where they were */
+TEST(text_marks)
+{
+	static struct sample sample;
+	struct text *text = &sample.text;
+	constexpr size_t gone = SIZE_MAX;
+	size_t none = 0;
+
+	assert(text_of(&sample, 16, "a\nb\nc\nd\ne\n"));
+	assert(marked(text, 6, &(const size_t[]){ 0, 1, 2, 3, 4, 5 }));
+	assert(text_replace(text, 2, 3, arrview_str("B\nB")) && text_is(text, "a\nB\nB\nc\nd\ne\n"));
+	assert(marked(text, 7, &(const size_t[]){ 0, gone, gone, 2, 3, 4, 5 }));
+	assert(text_replace(text, 8, 10, arrview_first(none, "")) && text_is(text, "a\nB\nB\nc\ne\n"));
+	assert(marked(text, 6, &(const size_t[]){ 0, gone, gone, gone, gone, 5 }));
+	text_mark(text);
+	assert(text_prefix(text, 4, 5, arrview_str("-")) && text_is(text, "a\nB\nB\nc\n-e\n"));
+	assert(marked(text, 6, &(const size_t[]){ 0, 1, 2, 3, gone, gone }));
+	assert(text_replace(text, 0, 2, arrview_first(none, "")) && text_is(text, "B\nB\nc\n-e\n"));
+	assert(marked(text, 5, &(const size_t[]){ gone, gone, gone, gone, gone }));
+}
+
 TEST(text_columns)
 {
 	static struct sample sample;

@@ -2,20 +2,25 @@
 #define _GNU_SOURCE
 
 #include <assert.h>
+#include <poor_stdio.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "logger.h"
 #include "lsp.h"
 #include "test-loop.h"
 #include "test-runner.h"
 
-/* Where the last request led */
+/* Where the last request led, and the tokens of 'text' that the last answer had */
 static struct {
 	uint64_t id;
-	size_t line, character;
-	unsigned states, locations;
+	size_t line, character, token_count;
+	unsigned states, locations, answers, refreshes, writes;
+	const struct text *text;
+	struct lsp_token tokens[8];
 	char path[PATH_MAX];
 	bool found;
 } result;
@@ -35,11 +40,34 @@ static void location(struct lsp *, uint64_t id, const char *path, size_t line, s
 	snprintf(result.path, sizeof(result.path), "%s", path ? path : "");
 }
 
+static void tokens(struct lsp *lsp, bool found)
+{
+	result.answers++;
+	result.found = found;
+	for (result.token_count = 0; found && result.token_count < ARRAY_SIZE(result.tokens) &&
+				     lsp_token(lsp, result.text, &result.tokens[result.token_count]);
+	     result.token_count++)
+		;
+}
+
+static void refresh(struct lsp *)
+{
+	result.refreshes++;
+}
+
+static void written(struct lsp *)
+{
+	result.writes++;
+}
+
 static struct lsp_memory memory;
 
 static const struct lsp_listener listener = {
 	.state = state,
 	.location = location,
+	.tokens = tokens,
+	.refresh = refresh,
+	.written = written,
 };
 
 /* A document in memory of the test */
@@ -106,6 +134,60 @@ TEST(lsp_locates)
 	loop_fini(&loop);
 }
 
+static bool token_is(size_t index, size_t line, size_t column, size_t length, enum syntax_class class)
+{
+	const struct lsp_token *token = &result.tokens[index];
+
+	return token->line == line && token->column == column && token->length == length && token->class == class;
+}
+
+/*
+ * Tokens have the classes of the types of the legend of the server, in bytes. Types that keep the lexical highlighting
+ * don't come. A save comes with the text that it saved if the server asks for it, then the server can ask for all
+ * tokens again.
+ */
+TEST(lsp_highlights)
+{
+	static struct lsp lsp;
+	static struct sample sample;
+	static const char source[] = "int main(void)\n{\n\treturn x;\n}\n";
+	const char *argv[] = { server(), nullptr };
+	char directory[] = "/tmp/lsp-test-XXXXXX", path[PATH_MAX];
+	struct poor_loop loop;
+	FILE *file;
+
+	loop_init(&loop);
+	log_init(&loop, "lsp-test");
+	sample_init(&sample, source);
+	result.text = &sample.text;
+	result.answers = 0;
+	lsp_init(&lsp, &loop, &listener, &memory);
+	lsp_start(&lsp, "/project dir", argv);
+	assert(!lsp_highlight(&lsp, "/project dir/a.c"));
+	run_until(&loop, lsp.state == LSP_READY);
+	assert(lsp.highlights && lsp_open(&lsp, "/project dir/a.c", "c", 1, &sample.text));
+	assert(lsp_highlight(&lsp, "/project dir/a.c"));
+	run_until(&loop, result.answers == 1);
+	assert(result.found && result.token_count == 4 && token_is(0, 0, 0, 3, SYNTAX_TYPE) &&
+	       token_is(1, 0, 4, 4, SYNTAX_FUNCTION) && token_is(2, 2, 8, 1, SYNTAX_MACRO) && token_is(3, 3, 0, 1, SYNTAX_INACTIVE));
+	assert(mkdtemp(directory));
+	snprintf_array(path, "%s/saved file.c", directory);
+	assert((file = fopen(path, "w")) && fputs(source, file) >= 0 && !fclose(file));
+	result.refreshes = 0;
+	assert(lsp.save_text);
+	lsp_save(&lsp, path, arrview_str("int main(void)\n{\n\treturn y;\n}\n"));
+	lsp_save(&lsp, path, arrview_str(source));
+	assert(lsp_highlight(&lsp, "/project dir/a.c"));
+	run_until(&loop, result.answers == 2);
+	assert(result.refreshes == 1);
+	unlink(path);
+	rmdir(directory);
+	lsp_stop(&lsp);
+	run_until(&loop, !lsp_busy(&lsp));
+	run_until(&loop, !log_pending());
+	loop_fini(&loop);
+}
+
 /*
  * A document that doesn't fit beside those that wait for the server isn't sent, until they are. Documents leave room
  * for closing them.
@@ -136,7 +218,9 @@ TEST(lsp_fills_up)
 	filled = lsp.out_size[lsp.fill];
 	lsp_close(&lsp, "/project dir/big.c");
 	assert(lsp.out_size[lsp.fill] > filled);
+	result.writes = 0;
 	run_until(&loop, !lsp.write_op.pending);
+	assert(result.writes);
 	assert(lsp_open(&lsp, "/project dir/big.c", "c", 3, &big.text));
 	lsp_stop(&lsp);
 	run_until(&loop, !lsp_busy(&lsp));

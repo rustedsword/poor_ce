@@ -11,7 +11,8 @@ constexpr uint32_t TEXT_REPLACEMENT = 0xfffd;
 
 /*
  * A document in memory of the caller and where its lines start: every line break starts a line. Each line has a byte
- * of the highlighter, which moves with its line and is 0 for new lines. 'widest' lines are 'columns' wide.
+ * of the highlighter, which moves with its line and is 0 for new lines. 'widest' lines are 'columns' wide. Edits since
+ * text_mark() changed the lines from 'changed_first' to 'changed_last', as they are now, and added 'changed_lines'.
  */
 struct text {
 	char *bytes;
@@ -20,6 +21,8 @@ struct text {
 	size_t size, capacity;
 	size_t line_count, line_capacity;
 	size_t columns, widest;
+	size_t changed_first, changed_last;
+	ptrdiff_t changed_lines;
 };
 
 /* A character of a line: its bytes, the columns that it covers and what shows */
@@ -54,6 +57,11 @@ bool text_fits_impl(const struct text *text, size_t start, size_t end, size_t si
 /* The lines from 'first' to 'last' lose as many bytes at their starts as 'cut' counts between their start and end */
 void text_unprefix(struct text *text, size_t first, size_t last, size_t (*cut)(const void *data, size_t start, size_t end),
 		   const void *data);
+
+/* Track edits from now on */
+void text_mark(struct text *text);
+/* The line that 'line' was at the mark, or SIZE_MAX if edits changed it */
+size_t text_marked_line(const struct text *text, size_t line);
 
 size_t text_line_start(const struct text *text, size_t line);
 /* Where the line break of the line starts, or the end of the document */

@@ -139,6 +139,18 @@ bool json_element_impl(size_t size, const char (*text)[size], struct json array,
 	return false;
 }
 
+bool json_next_impl(size_t size, const char (*text)[size], struct json array, size_t *at, struct json *value)
+{
+	if ((*text)[array.start] != '[')
+		return false;
+	if (!*at)
+		*at = space(size, text, array.start + 1);
+	if (*at >= array.end || (*text)[*at] == ']')
+		return false;
+	*value = next_value(size, text, at);
+	return value->end != SIZE_MAX;
+}
+
 bool json_integer_impl(size_t size, const char (*text)[size], struct json value, int64_t *integer)
 {
 	bool negative = (*text)[value.start] == '-';

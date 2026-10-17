@@ -31,6 +31,8 @@ static const uint32_t CLASSES[SYNTAX_CLASSES] = {
 	[SYNTAX_COMMENT] = QUAD_RGB(THEME_COMMENT),
 	[SYNTAX_PREPROCESSOR] = QUAD_RGB(THEME_PREPROCESSOR),
 	[SYNTAX_ATTRIBUTE] = QUAD_RGB(THEME_ATTRIBUTE),
+	[SYNTAX_MACRO] = QUAD_RGB(THEME_MACRO),
+	[SYNTAX_INACTIVE] = QUAD_RGB(THEME_INACTIVE),
 };
 
 constexpr uint32_t ARROW_RIGHT = 0x25b8;
@@ -195,13 +197,32 @@ static void selection(struct scene *scene, const struct document *document, size
 	solid(scene, x0, y, x1 - x0, editor->cell_height, editor->focused ? SELECTION : SELECTION_INACTIVE);
 }
 
-/* Combining marks go over the cell before them */
-static void characters_of(struct scene *scene, const struct document *document, size_t line, int32_t y)
+/* The tokens of 'line', from the returned index to 'end'. None if the line was edited since they came. */
+static size_t words_of(const struct editor_tab *tab, size_t line, size_t *end)
+{
+	size_t marked = text_marked_line(&tab->document.text, line), low = 0, high = tab->token_count;
+
+	while (low < high) {
+		size_t middle = low + (high - low) / 2;
+
+		if ((*tab->tokens)[middle].line < marked)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	for (*end = low; marked != SIZE_MAX && *end < tab->token_count && (*tab->tokens)[*end].line == marked; ++*end)
+		;
+	return low;
+}
+
+/* Combining marks go over the cell before them. Tokens of the language server win over the lexical highlighting. */
+static void characters_of(struct scene *scene, const struct editor_tab *tab, size_t line, int32_t y)
 {
 	const struct editor *editor = scene->editor;
+	const struct document *document = &tab->document;
 	const struct text *text = &document->text;
 	const struct view *view = &document->view;
-	size_t columns = view_columns(view), start = text_line_start(text, line);
+	size_t columns = view_columns(view), start = text_line_start(text, line), end, word = words_of(tab, line, &end);
 	int32_t x = editor->text_rect.x + view->padding;
 	struct syntax_token token;
 	struct syntax syntax;
@@ -215,16 +236,22 @@ static void characters_of(struct scene *scene, const struct document *document, 
 	}
 	text_chars_init(text, line, &c);
 	while (text_chars_next(text, &c)) {
-		size_t column = c.width || !c.column ? c.column : c.column - 1;
+		size_t column = c.width || !c.column ? c.column : c.column - 1, at = c.offset - start;
+		enum syntax_class class;
 
 		if (c.column >= view->left + columns)
 			break;
 		if (column < view->left || c.codepoint == ' ')
 			continue;
-		while (tokens && c.offset - start >= token.end)
+		while (tokens && at >= token.end)
 			tokens = syntax_next(&syntax, &token);
-		glyph(scene, x + (column - view->left) * editor->cell_width, y, c.codepoint,
-		      CLASSES[tokens && c.offset - start >= token.start ? token.class : SYNTAX_PLAIN]);
+		while (word < end && at >= (size_t)(*tab->tokens)[word].column + (*tab->tokens)[word].length)
+			word++;
+		if (word < end && at >= (*tab->tokens)[word].column)
+			class = (*tab->tokens)[word].class;
+		else
+			class = tokens && at >= token.start ? token.class : SYNTAX_PLAIN;
+		glyph(scene, x + (column - view->left) * editor->cell_width, y, c.codepoint, CLASSES[class]);
 	}
 }
 
@@ -319,7 +346,7 @@ static void text(struct scene *scene)
 		number(scene, gutter->x + gutter->width - editor->cell_width, y, line + 1, line == caret_line ? TEXT : LINE_NUMBER);
 		if (selected)
 			selection(scene, document, line, y, start, end);
-		characters_of(scene, document, line, y);
+		characters_of(scene, tab, line, y);
 	}
 	column = text_column_of(text, caret_line, view->caret);
 	if (caret_line >= view->top && caret_line < view->top + rows && column >= view->left &&

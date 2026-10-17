@@ -119,6 +119,44 @@ static struct editor_tab *lsp_sync_all(struct editor *editor)
 	return stale;
 }
 
+static bool serving(const struct editor *editor)
+{
+	return editor->lsp.state == LSP_READY && !editor->lsp.stopping;
+}
+
+/* Whether the shown document needs tokens that haven't been asked for yet */
+static bool stale(const struct editor *editor, const struct editor_tab *tab)
+{
+	return tab && !tab->loading && tab->document.code && editor->lsp.highlights &&
+	       tab->tokens_version != tab->document.version &&
+	       (editor->highlight_tab != tab || editor->highlight_version != tab->document.version);
+}
+
+/* Documents go to the server, and the shown one gets its tokens, once they stop changing for a moment */
+static void highlight(struct editor *editor)
+{
+	bool unsent = false;
+
+	if (!serving(editor))
+		return;
+	foreach_array_const_ref(arrview_first(editor->tab_count, editor->order), tab)
+		unsent |= language((*tab)->path) && !(*tab)->loading && (*tab)->lsp_version != (*tab)->document.version;
+	if (unsent || stale(editor, editor_tab(editor)))
+		poor_loop_timer_arm(editor->loop, &editor->highlight, poor_loop_now() + EDITOR_HIGHLIGHT_NS);
+}
+
+/* Every changed document goes to the server first, tokens depend on headers. After a full buffer, writes retry this. */
+static void on_highlight(struct poor_loop *, struct poor_loop_timer *timer)
+{
+	struct editor *editor = container_of(timer, struct editor, highlight);
+	struct editor_tab *tab = editor_tab(editor);
+
+	if (!serving(editor) || lsp_sync_all(editor) || !stale(editor, tab) || !lsp_highlight(&editor->lsp, tab->path))
+		return;
+	editor->highlight_tab = tab;
+	editor->highlight_version = tab->document.version;
+}
+
 /* Cells of a tab: its name between a blank and a mark that closes it or shows changes */
 static size_t tab_cells(const struct editor_tab *tab)
 {
@@ -211,6 +249,7 @@ static void activate(struct editor *editor, size_t index)
 	editor->drag = EDITOR_IDLE;
 	editor_layout(editor);
 	retitle(editor);
+	highlight(editor);
 	changed(editor);
 }
 
@@ -257,9 +296,11 @@ static struct editor_tab *tab_new(struct editor *editor, const char *path)
 	poor_loop_op_init(&tab->sync_op, on_sync);
 	poor_loop_op_init(&tab->stat_op, on_stat);
 	poor_loop_op_init(&tab->truncate_op, on_truncate);
+	tab->tokens = &memory->tokens;
+	tab->token_count = 0;
 	tab->jump_offset = SIZE_MAX;
 	tab->digits = GUTTER_DIGITS;
-	tab->lsp_version = 0;
+	tab->lsp_version = tab->tokens_version = 0;
 	tab->loading = tab->saving = tab->queued = tab->closing = tab->file_open = tab->jump = tab->close_saved = false;
 	tab->identified = false;
 	snprintf_array(tab->path, "%s", path);
@@ -289,6 +330,8 @@ static void tab_close(struct editor_tab *tab)
 		editor->paste_tab = nullptr;
 	if (editor->request && editor->request_tab == tab)
 		editor->request = 0;
+	if (editor->highlight_tab == tab)
+		editor->highlight_tab = nullptr;
 	foreach_array_ref(((struct poor_loop_op *[]){ &tab->open_op, &tab->read_op }), op)
 		if ((*op)->pending)
 			io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(editor->loop)), *op, 0);
@@ -326,6 +369,7 @@ static void loaded(struct editor_tab *tab, bool cut)
 	tab->jump = false;
 	tab->jump_offset = SIZE_MAX;
 	lsp_sync(editor, tab);
+	highlight(editor);
 	changed(editor);
 }
 
@@ -462,7 +506,10 @@ static bool saving(const struct editor *editor)
 	return false;
 }
 
-/* A failed save keeps its tab, and the editor, open */
+/*
+ * A failed save keeps its tab, and the editor, open. The server hears about a save after the changes that it saved,
+ * with the bytes of the file, which stay until the next save. Without room for that, it doesn't.
+ */
 static void saved(struct editor_tab *tab)
 {
 	struct editor *editor = tab->editor;
@@ -480,6 +527,8 @@ static void saved(struct editor_tab *tab)
 		editor->confirm = EDITOR_NOTHING;
 	} else {
 		status(editor, "%s is saved", path_name(tab->path));
+		if (serving(editor) && tab->lsp_version && !tab->closing && lsp_sync(editor, tab))
+			lsp_save(&editor->lsp, tab->path, arrview_first(tab->size, editor->memory->save));
 	}
 	if (tab->close_saved && !tab->closing)
 		tab_close(tab);
@@ -715,14 +764,61 @@ static void lsp_state(struct lsp *lsp)
 	else if (lsp->state != LSP_STARTING)
 		foreach_array_ref(arrview_first(editor->tab_count, editor->order), tab)
 			(*tab)->lsp_version = 0;
-	if (lsp->state != LSP_READY)
+	if (lsp->state != LSP_READY) {
 		editor->request = 0;
+		editor->highlight_tab = nullptr;
+	}
+	highlight(editor);
 	changed(editor);
+}
+
+/* Tokens of an older version are dropped and asked for again. After a failed request, the next edit asks again. */
+static void lsp_tokens(struct lsp *lsp, bool found)
+{
+	struct editor *editor = container_of(lsp, struct editor, lsp);
+	struct editor_tab *tab = editor->highlight_tab;
+	struct lsp_token token;
+
+	editor->highlight_tab = nullptr;
+	if (tab && tab->document.version == editor->highlight_version) {
+		for (tab->token_count = 0; found && tab->token_count < ARRAY_SIZE(*tab->tokens) &&
+					   lsp_token(lsp, &tab->document.text, &token);
+		     tab->token_count++)
+			(*tab->tokens)[tab->token_count] = (struct editor_token){
+				.line = token.line,
+				.column = token.column,
+				.length = token.length < UINT16_MAX ? token.length : UINT16_MAX,
+				.class = token.class,
+			};
+		tab->tokens_version = tab->document.version;
+		text_mark(&tab->document.text);
+		changed(editor);
+	}
+	highlight(editor);
+}
+
+/* All tokens are asked for again, and an answer that may be older than the change goes nowhere */
+static void lsp_refresh(struct lsp *lsp)
+{
+	struct editor *editor = container_of(lsp, struct editor, lsp);
+
+	foreach_array_ref(arrview_first(editor->tab_count, editor->order), tab)
+		(*tab)->tokens_version = 0;
+	editor->highlight_tab = nullptr;
+	highlight(editor);
+}
+
+static void lsp_written(struct lsp *lsp)
+{
+	highlight(container_of(lsp, struct editor, lsp));
 }
 
 static const struct lsp_listener lsp_listener = {
 	.state = lsp_state,
 	.location = lsp_location,
+	.tokens = lsp_tokens,
+	.refresh = lsp_refresh,
+	.written = lsp_written,
 };
 
 static void tree_changed(struct tree *tree)
@@ -767,6 +863,7 @@ static void update(struct editor *editor, bool done)
 	if (!done)
 		return;
 	editor_layout(editor);
+	highlight(editor);
 	changed(editor);
 }
 
@@ -1241,6 +1338,8 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	editor->started = false;
 	foreach_array_ref(editor->tabs, tab)
 		tab->used = false;
+	poor_loop_timer_init(&editor->highlight, on_highlight);
+	editor->highlight_tab = nullptr;
 	lsp_init(&editor->lsp, loop, &lsp_listener, &memory->lsp);
 	editor_layout(editor);
 	retitle(editor);
@@ -1262,6 +1361,7 @@ void editor_stop(struct editor *editor)
 {
 	if (editor->started)
 		tree_stop(&editor->tree);
+	poor_loop_timer_disarm(&editor->highlight);
 	editor->request = 0;
 	lsp_stop(&editor->lsp);
 	foreach_array_ref(editor->tabs, tab) {

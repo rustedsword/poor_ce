@@ -22,6 +22,20 @@ constexpr size_t URI_BYTES = 3 * PATH_MAX + 8;
 poor_loop_group_attach(lsp_output, struct lsp, writer, write_op, on_write);
 poor_loop_group_attach(lsp_input, struct lsp, reader, read_op, on_read);
 
+/*
+ * The colors of token types. Others, like variables, parameters, fields and operators, keep the lexical highlighting.
+ * clangd marks code that the preprocessor skips as comments.
+ */
+static const struct {
+	const char *name;
+	enum syntax_class class;
+} KINDS[] = {
+	{ "class", SYNTAX_TYPE }, { "comment", SYNTAX_INACTIVE }, { "concept", SYNTAX_TYPE }, { "enum", SYNTAX_TYPE },
+	{ "enumMember", SYNTAX_CONSTANT }, { "function", SYNTAX_FUNCTION }, { "interface", SYNTAX_TYPE },
+	{ "macro", SYNTAX_MACRO }, { "method", SYNTAX_FUNCTION }, { "struct", SYNTAX_TYPE }, { "type", SYNTAX_TYPE },
+	{ "typeParameter", SYNTAX_TYPE },
+};
+
 static void set_state(struct lsp *lsp, enum lsp_state state)
 {
 	lsp->state = state;
@@ -78,6 +92,7 @@ POOR_LOOP_GROUP_OP(on_write, loop, writer, op, cqe)
 	flush(lsp);
 	if (lsp->state == LSP_STOPPING)
 		close_writer(lsp, false);
+	lsp->listener->written(lsp);
 }
 
 POOR_LOOP_FD_DONE(lsp_output, loop, writer)
@@ -191,13 +206,35 @@ static void initialize(struct lsp *lsp)
 	json_printf(writer, ",\"params\":{\"processId\":%d,\"clientInfo\":{\"name\":\"poor_text_viewer\"},\"rootUri\":", getpid());
 	uri(writer, lsp->root);
 	json_printf(writer, ",\"capabilities\":{\"general\":{\"positionEncodings\":[\"utf-8\",\"utf-16\"]},"
-			    "\"textDocument\":{\"definition\":{\"linkSupport\":false},\"declaration\":{\"linkSupport\":false}}}}}");
+			    "\"workspace\":{\"semanticTokens\":{\"refreshSupport\":true}},"
+			    "\"textDocument\":{\"synchronization\":{\"didSave\":true},\"definition\":{\"linkSupport\":false},"
+			    "\"declaration\":{\"linkSupport\":false},\"semanticTokens\":{\"requests\":{\"full\":true},\"tokenTypes\":[");
+	foreach_array_const_ref(KINDS, kind)
+		json_printf(writer, "%s\"%s\"", kind == KINDS ? "" : ",", kind->name);
+	json_printf(writer, "],\"tokenModifiers\":[],\"formats\":[\"relative\"],\"overlappingTokenSupport\":false,"
+			    "\"multilineTokenSupport\":false}}}}}");
 	post(lsp);
+}
+
+/* Whether the server sends tokens of whole documents, and the class of each token type of its legend */
+static void legend(struct lsp *lsp, size_t size, const char (*body)[size], struct json capabilities)
+{
+	struct json provider, full, legend, types, type;
+	char name[32];
+
+	fill_array(lsp->legend, SYNTAX_CLASSES);
+	lsp->highlights = json_member(body, capabilities, "semanticTokensProvider", &provider) &&
+			  json_member(body, provider, "full", &full) && !json_is(body, full, "false") &&
+			  json_member(body, provider, "legend", &legend) && json_member(body, legend, "tokenTypes", &types);
+	for (size_t i = 0, at = 0; lsp->highlights && i < ARRAY_SIZE(lsp->legend) && json_next(body, types, &at, &type); i++)
+		foreach_array_const_ref(KINDS, kind)
+			if (json_string(body, type, name) != SIZE_MAX && !strcmp(name, kind->name))
+				lsp->legend[i] = kind->class;
 }
 
 static void initialized(struct lsp *lsp, size_t size, const char (*body)[size], struct json root)
 {
-	struct json result, capabilities, encoding;
+	struct json result, capabilities, encoding, sync, save, text;
 
 	if (!json_member(body, root, "result", &result)) {
 		log_printf("poor_text_viewer: %s didn't start\n", lsp->argv[0]);
@@ -206,6 +243,12 @@ static void initialized(struct lsp *lsp, size_t size, const char (*body)[size], 
 	}
 	lsp->utf16 = !json_member(body, result, "capabilities", &capabilities) ||
 		     !json_member(body, capabilities, "positionEncoding", &encoding) || !json_is(body, encoding, "\"utf-8\"");
+	if (json_member(body, result, "capabilities", &capabilities))
+		legend(lsp, size, body, capabilities);
+	lsp->saves = json_member(body, result, "capabilities", &capabilities) &&
+		     json_member(body, capabilities, "textDocumentSync", &sync) && json_member(body, sync, "save", &save) &&
+		     !json_is(body, save, "false");
+	lsp->save_text = lsp->saves && json_member(body, save, "includeText", &text) && json_is(body, text, "true");
 	json_printf(notification(lsp, "initialized", false), ",\"params\":{}}");
 	post(lsp);
 	set_state(lsp, LSP_READY);
@@ -236,6 +279,20 @@ static void located(struct lsp *lsp, uint64_t id, size_t size, const char (*body
 	lsp->listener->location(lsp, id, path, path ? line : 0, path ? character : 0);
 }
 
+/* The listener reads the tokens with lsp_token() while the answer is in the buffer */
+static void highlighted(struct lsp *lsp, size_t size, const char (*body)[size], struct json root)
+{
+	struct json result;
+	bool found = json_member(body, root, "result", &result) && json_member(body, result, "data", &lsp->token_data);
+
+	lsp->highlight_id = 0;
+	lsp->answer = *body;
+	lsp->answer_size = size;
+	lsp->token_at = lsp->token_line = lsp->token_character = 0;
+	lsp->walk_line = SIZE_MAX;
+	lsp->listener->tokens(lsp, found);
+}
+
 /* Requests of the server get no result */
 static void dispatch(struct lsp *lsp, size_t size, const char (*body)[size])
 {
@@ -248,6 +305,8 @@ static void dispatch(struct lsp *lsp, size_t size, const char (*body)[size])
 		json_printf(message(lsp, false), "{\"jsonrpc\":\"2.0\",\"id\":%.*s,\"result\":null}", (int)(id.end - id.start),
 			    &(*body)[id.start]);
 		post(lsp);
+		if (json_is(body, method, "\"workspace/semanticTokens/refresh\""))
+			lsp->listener->refresh(lsp);
 		return;
 	}
 	if (!json_integer(body, id, &number))
@@ -259,6 +318,8 @@ static void dispatch(struct lsp *lsp, size_t size, const char (*body)[size])
 		post(lsp);
 		set_state(lsp, LSP_STOPPING);
 		close_writer(lsp, false);
+	} else if ((uint64_t)number == lsp->highlight_id) {
+		highlighted(lsp, size, body, root);
 	} else {
 		located(lsp, number, size, body, root);
 	}
@@ -458,10 +519,11 @@ void lsp_init(struct lsp *lsp, struct poor_loop *loop, const struct lsp_listener
 	lsp->argv = nullptr;
 	lsp->state = LSP_OFF;
 	lsp->next_id = 1;
-	lsp->initialize_id = lsp->shutdown_id = 0;
+	lsp->initialize_id = lsp->shutdown_id = lsp->highlight_id = 0;
 	lsp->out_size[0] = lsp->out_size[1] = lsp->written = lsp->in_size = lsp->skip = 0;
 	lsp->fill = lsp->pipes_made = 0;
-	lsp->utf16 = lsp->writer_open = lsp->reader_open = lsp->holding = lsp->running = lsp->stopping = false;
+	lsp->utf16 = lsp->highlights = lsp->saves = lsp->save_text = false;
+	lsp->writer_open = lsp->reader_open = lsp->holding = lsp->running = lsp->stopping = false;
 }
 
 void lsp_start(struct lsp *lsp, const char *root, const char *const *argv)
@@ -521,6 +583,25 @@ void lsp_close(struct lsp *lsp, const char *path)
 	post(lsp);
 }
 
+/* Only for servers that ask for it, with the text if they ask for that too, and not after shutdown began */
+void lsp_save_impl(struct lsp *lsp, const char *path, size_t size, const char (*text)[size])
+{
+	struct json_writer *writer;
+
+	if (lsp->state != LSP_READY || lsp->stopping || !lsp->saves)
+		return;
+	writer = notification(lsp, "textDocument/didSave", lsp->save_text);
+	json_printf(writer, ",\"params\":{\"textDocument\":");
+	document(writer, path);
+	json_printf(writer, "}");
+	if (lsp->save_text) {
+		json_printf(writer, ",\"text\":");
+		json_quote(writer, text);
+	}
+	json_printf(writer, "}}");
+	post(lsp);
+}
+
 /* The code units of a character for the server, which got invalid UTF-8 as U+FFFD */
 static size_t units(const struct lsp *lsp, uint32_t codepoint, size_t length)
 {
@@ -566,6 +647,75 @@ size_t lsp_offset(const struct lsp *lsp, const struct text *text, size_t line, s
 		counted += units(lsp, codepoint, length);
 	}
 	return at;
+}
+
+bool lsp_highlight(struct lsp *lsp, const char *path)
+{
+	struct json_writer *writer;
+	uint64_t id;
+
+	if (lsp->state != LSP_READY || !lsp->highlights)
+		return false;
+	id = lsp->next_id++;
+	writer = request(lsp, id, "textDocument/semanticTokens/full");
+	json_printf(writer, ",\"params\":{\"textDocument\":");
+	document(writer, path);
+	json_printf(writer, "}}}");
+	if (!post(lsp))
+		return false;
+	lsp->highlight_id = id;
+	return true;
+}
+
+/* The byte offset of 'character' on 'line', counted on from the last position if it is on the same line */
+static size_t walk(struct lsp *lsp, const struct text *text, size_t line, size_t character)
+{
+	auto all = array_ptr(text->bytes, text->size);
+	size_t end = text_line_end(text, line), length;
+
+	if (lsp->walk_line != line || lsp->walk_units > character) {
+		lsp->walk_line = line;
+		lsp->walk_offset = text_line_start(text, line);
+		lsp->walk_units = 0;
+	}
+	while (lsp->walk_units < character && lsp->walk_offset < end) {
+		uint32_t codepoint = utf8_decode(arrview(lsp->walk_offset, end - lsp->walk_offset, all), &length);
+
+		lsp->walk_units += units(lsp, codepoint, length);
+		lsp->walk_offset += length;
+	}
+	return lsp->walk_offset;
+}
+
+/* Each token is five numbers: line and character relative to the previous token, length, type and modifiers */
+bool lsp_token(struct lsp *lsp, const struct text *text, struct lsp_token *token)
+{
+	auto body = array_ptr(lsp->answer, lsp->answer_size);
+	int64_t values[5];
+	struct json value;
+	size_t start, end;
+
+	for (;;) {
+		foreach_array_ref(values, number)
+			if (!json_next(body, lsp->token_data, &lsp->token_at, &value) || !json_integer(body, value, number) ||
+			    *number < 0)
+				return false;
+		lsp->token_character = values[0] ? (size_t)values[1] : lsp->token_character + values[1];
+		lsp->token_line += values[0];
+		if (lsp->token_line >= text->line_count)
+			return false;
+		if (values[3] >= (int64_t)ARRAY_SIZE(lsp->legend) || lsp->legend[values[3]] == SYNTAX_CLASSES)
+			continue;
+		start = walk(lsp, text, lsp->token_line, lsp->token_character);
+		end = walk(lsp, text, lsp->token_line, lsp->token_character + values[2]);
+		*token = (struct lsp_token){
+			.line = lsp->token_line,
+			.column = start - text_line_start(text, lsp->token_line),
+			.length = end - start,
+			.class = lsp->legend[values[3]],
+		};
+		return true;
+	}
 }
 
 /* A server that doesn't exit in time is killed */

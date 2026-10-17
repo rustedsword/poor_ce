@@ -28,6 +28,8 @@ constexpr uint32_t THEME_STRING = 0xa31515;
 constexpr uint32_t THEME_COMMENT = 0x008000;
 constexpr uint32_t THEME_PREPROCESSOR = 0xaf00db;
 constexpr uint32_t THEME_ATTRIBUTE = 0x7a3e9d;
+constexpr uint32_t THEME_MACRO = 0x8a1bff;
+constexpr uint32_t THEME_INACTIVE = 0xa3a3a3;
 #else
 constexpr uint32_t THEME_BACKGROUND = 0x000000;
 constexpr uint32_t THEME_PANEL = 0x000000;
@@ -51,6 +53,8 @@ constexpr uint32_t THEME_STRING = 0xce9178;
 constexpr uint32_t THEME_COMMENT = 0x6a9955;
 constexpr uint32_t THEME_PREPROCESSOR = 0xc586c0;
 constexpr uint32_t THEME_ATTRIBUTE = 0xd7ba7d;
+constexpr uint32_t THEME_MACRO = 0xbeb7ff;
+constexpr uint32_t THEME_INACTIVE = 0x6e6e6e;
 #endif
 
 #endif

@@ -19,6 +19,9 @@ struct json {
 #define json_member(text, object, key, value) json_member_impl(ARRAY_SIZE(text), &auto_arr(text), object, key, value)
 [[nodiscard]] bool json_element_impl(size_t size, const char (*text)[size], struct json array, size_t index, struct json *value);
 #define json_element(text, array, index, value) json_element_impl(ARRAY_SIZE(text), &auto_arr(text), array, index, value)
+/* The elements of an array one after another: 'at' is 0 for the first one and moves on */
+[[nodiscard]] bool json_next_impl(size_t size, const char (*text)[size], struct json array, size_t *at, struct json *value);
+#define json_next(text, array, at, value) json_next_impl(ARRAY_SIZE(text), &auto_arr(text), array, at, value)
 [[nodiscard]] bool json_integer_impl(size_t size, const char (*text)[size], struct json value, int64_t *integer);
 #define json_integer(text, value, integer) json_integer_impl(ARRAY_SIZE(text), &auto_arr(text), value, integer)
 /* Unescape a string into 'out' and end it with a 0. Returns its length, or SIZE_MAX if it is no string or doesn't fit. */

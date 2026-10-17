@@ -937,6 +937,206 @@ TEST(editor_hides_far_caret)
 	project_fini(&project);
 }
 
+/* The color of the character at 'column' of 'line' of the shown document */
+static uint32_t color_at(struct atlas *atlas, size_t line, size_t column)
+{
+	static struct quad quads[4096];
+	const struct view *view = &editor_tab(&editor)->document.view;
+	int32_t x = editor.text_rect.x + view->padding + (column - view->left) * editor.cell_width;
+	int32_t y = editor.text_rect.y + view->padding + (line - view->top) * editor.cell_height;
+	size_t count = scene_build(&editor, atlas, quads);
+
+	foreach_array_const_ref(arrview_first(count, quads), quad)
+		if (quad->u != QUAD_SOLID && quad->x == x && quad->y == y)
+			return quad->color;
+	return 0;
+}
+
+/*
+ * Words show as the server tells once the shown document stays as it is for a moment. Lines that edits changed show as
+ * they look until the next tokens come, the others keep theirs.
+ */
+TEST(editor_highlights)
+{
+	static struct project project;
+	static struct atlas atlas;
+	const char *server[] = { getenv("FAKE_LSP"), nullptr };
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	assert(tab->token_count == 4 && color_at(&atlas, 2, 15) == QUAD_RGB(THEME_MACRO));
+	assert(color_at(&atlas, 3, 0) == QUAD_RGB(THEME_INACTIVE));
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(color_at(&atlas, 3, 15) == QUAD_RGB(THEME_MACRO) && color_at(&atlas, 4, 0) == QUAD_RGB(THEME_INACTIVE));
+	assert(document_place(&tab->document, text_line_start(&tab->document.text, 4), false));
+	type(&editor, XKB_KEY_a, 0, "a");
+	assert(color_at(&atlas, 4, 1) == QUAD_RGB(THEME_TEXT) && tab->tokens_version != tab->document.version);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+/* An answer with tokens that comes once the editor stops asks for no more, so nothing is left for the loop */
+TEST(editor_stops_highlighting)
+{
+	static struct project project;
+	const char *server[] = { getenv("FAKE_LSP"), nullptr };
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	type(&editor, XKB_KEY_a, 0, "a");
+	run_until(&loop, editor.highlight_tab == tab);
+	type(&editor, XKB_KEY_b, 0, "b");
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/*
+ * A document that changed goes to the server even if another one shows, whose tokens may depend on it. After a save,
+ * the server can tell that the tokens of all documents may have changed, then they are asked for again.
+ */
+TEST(editor_highlights_with_other_documents)
+{
+	static struct project project;
+	const char *server[] = { getenv("FAKE_LSP"), nullptr };
+	struct editor_tab *code, *header;
+	struct poor_loop loop;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/tar get.h", project.root);
+	editor_open(&editor, project.path);
+	header = loaded(&editor, &loop);
+	run_until(&loop, header->tokens_version == header->document.version);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	code = loaded(&editor, &loop);
+	run_until(&loop, code->tokens_version == code->document.version);
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	run_until(&loop, header->lsp_version == header->document.version);
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
+	run_until(&loop, !header->saving);
+	run_until(&loop, !code->tokens_version);
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	run_until(&loop, code->tokens_version == code->document.version);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/*
+ * A save tells the server what it saved, after the changes that it saved, and files that include the document may
+ * change. Typing goes on meanwhile.
+ */
+TEST(editor_tells_saves)
+{
+	static struct project project;
+	const char *server[] = { getenv("FAKE_LSP"), nullptr };
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_y, 0, "y");
+	run_until(&loop, !tab->saving);
+	assert(tab->lsp_version == tab->document.version);
+	run_until(&loop, !tab->tokens_version);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* Messages that aren't of the editor fill up the buffer for the server, which reads big ones late */
+static void fill(struct lsp *lsp)
+{
+	static struct {
+		struct text text;
+		char bytes[22 << 20];
+		uint32_t lines[1];
+		uint8_t states[1];
+	} big;
+
+	text_init(&big.text, big.bytes, big.lines, big.states);
+	memset(big.bytes, 'a', sizeof(big.bytes));
+	big.text.size = 2 << 20;
+	assert(lsp_open(lsp, "/a.c", "c", 1, &big.text));
+	big.text.size = sizeof(big.bytes);
+	assert(lsp_open(lsp, "/b.c", "c", 1, &big.text));
+	big.text.size = 0;
+	while (lsp_open(lsp, "/c.c", "c", 1, &big.text))
+		;
+}
+
+/* A document that doesn't fit beside the messages that wait for the server goes to it once they are written, without input */
+TEST(editor_waits_for_the_server)
+{
+	static struct project project;
+	const char *server[] = { getenv("FAKE_LSP"), "slow", nullptr };
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->lsp_version == tab->document.version && !editor.lsp.write_op.pending);
+	fill(&editor.lsp);
+	type(&editor, XKB_KEY_x, 0, "x");
+	run_until(&loop, tab->lsp_version == tab->document.version);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
 static void click(double x, double y, uint32_t time)
 {
 	editor_button(&editor, x, y, BTN_LEFT, true, time, 0);

@@ -43,6 +43,38 @@ void text_init_impl(struct text *text, size_t capacity, char (*bytes)[capacity],
 	text->states[0] = 0;
 	text->columns = 0;
 	text->widest = 1;
+	text_mark(text);
+}
+
+void text_mark(struct text *text)
+{
+	text->changed_first = SIZE_MAX;
+	text->changed_last = 0;
+	text->changed_lines = 0;
+}
+
+/* Lines 'first' to 'last' became 'count' lines from 'first', the changed lines grow to cover them */
+static void changed(struct text *text, size_t first, size_t last, size_t count)
+{
+	ptrdiff_t added = (ptrdiff_t)count - (ptrdiff_t)(last - first + 1);
+	size_t from = text->changed_first, to = text->changed_last, end = first + count - 1;
+
+	if (from <= to) {
+		from = from < first ? from : from > last ? from + added : first;
+		to = to < first ? to : to > last ? to + added : end;
+	}
+	text->changed_first = from < first ? from : first;
+	text->changed_last = from <= to && to > end ? to : end;
+	text->changed_lines += added;
+}
+
+size_t text_marked_line(const struct text *text, size_t line)
+{
+	if (line < text->changed_first)
+		return line;
+	if (line > text->changed_last)
+		return (size_t)((ptrdiff_t)line - text->changed_lines);
+	return SIZE_MAX;
 }
 
 static size_t width(const struct text *text, size_t line)
@@ -95,6 +127,7 @@ bool text_load(struct text *text, size_t size)
 	memset_array(arrview_first(text->line_count, array_ptr(text->states, text->line_capacity)), 0);
 	text->columns = text->widest = 0;
 	measure(text, 0, text->line_count, false);
+	text_mark(text);
 	return fits;
 }
 
@@ -146,6 +179,7 @@ bool text_replace_impl(struct text *text, size_t start, size_t end, size_t size,
 	text->size = text->size - (end - start) + size;
 	text->line_count = line_count;
 	measure(text, first, added + 1, false);
+	changed(text, first, last, added + 1);
 	return true;
 }
 
@@ -187,6 +221,7 @@ bool text_prefix_impl(struct text *text, size_t first, size_t last, size_t size,
 		*line += grow;
 	text->size += grow;
 	measure(text, first, last - first + 1, false);
+	changed(text, first, last, last - first + 1);
 	return true;
 }
 
@@ -214,6 +249,7 @@ void text_unprefix(struct text *text, size_t first, size_t last, size_t (*cut)(c
 		*line -= removed;
 	text->size -= removed;
 	measure(text, first, last - first + 1, false);
+	changed(text, first, last, last - first + 1);
 }
 
 size_t text_line_start(const struct text *text, size_t line)

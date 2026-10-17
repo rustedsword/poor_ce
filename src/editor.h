@@ -18,17 +18,26 @@ constexpr size_t EDITOR_STATUS = 256;
 constexpr size_t EDITOR_TREE_COLUMNS = 28;
 constexpr size_t EDITOR_TREE_MIN = 8;
 constexpr uint32_t EDITOR_CLICK_MS = 400;
+constexpr size_t EDITOR_TOKENS = 1 << 17;
+constexpr uint64_t EDITOR_HIGHLIGHT_NS = 250'000'000;
 
 poor_loop_fd_declare(editor_file);
 
 struct editor;
+
+/* A token of the language server: its line when the tokens came, its byte column and length, and its class */
+struct editor_token {
+	uint32_t line, column;
+	uint16_t length;
+	enum syntax_class class;
+};
 
 /*
  * A file in a tab and how it is read and written. The server has 'lsp_version' of the document, none for 0. Once
  * the file is read, the caret goes to 'jump_offset', or to 'jump_line' and 'jump_character' of the server. A tab
  * that is closed while it is saved closes once the save succeeds, unless input comes first. The file is 'inode' on
  * 'device' once it is 'identified': a tab that opens a file of another tab under another path gives way to that tab,
- * and one that would save over it doesn't.
+ * and one that would save over it doesn't. The 'tokens' of the server are of 'tokens_version' of the document.
  */
 struct editor_tab {
 	struct editor *editor;
@@ -36,8 +45,9 @@ struct editor_tab {
 	editor_file file;
 	struct poor_loop_op open_op, read_op, create_op, stat_op, truncate_op, write_op, sync_op;
 	struct statx statx;
-	size_t done, size, digits, jump_offset, jump_line, jump_character;
-	uint64_t lsp_version, inode;
+	struct editor_token (*tokens)[EDITOR_TOKENS];
+	size_t done, size, digits, jump_offset, jump_line, jump_character, token_count;
+	uint64_t lsp_version, tokens_version, inode;
 	uint32_t device;
 	int error;
 	bool used, loading, saving, queued, closing, file_open, jump, close_saved, identified;
@@ -58,6 +68,7 @@ struct editor_memory {
 		uint8_t states[EDITOR_LINES];
 		struct history_edit edits[HISTORY_EDITS];
 		char history[HISTORY_BYTES];
+		struct editor_token tokens[EDITOR_TOKENS];
 	} documents[EDITOR_TABS];
 	char save[EDITOR_BYTES];
 	struct editor_jump jumps[EDITOR_JUMPS];
@@ -110,10 +121,11 @@ struct editor {
 	struct lsp lsp;
 	struct editor_tab *order[EDITOR_TABS];
 	struct editor_tab *saving;
+	struct poor_loop_timer highlight;
 	size_t tab_count, active, tab_first;
 	size_t jump_count, jump_at;
-	uint64_t request, request_version, paste_version;
-	struct editor_tab *request_tab, *paste_tab, *confirm_tab, *click_tab;
+	uint64_t request, request_version, paste_version, highlight_version;
+	struct editor_tab *request_tab, *paste_tab, *confirm_tab, *click_tab, *highlight_tab;
 	size_t request_caret, paste_anchor, paste_caret;
 	struct editor_rect tree_rect, tabs_rect, gutter_rect, text_rect, status_rect;
 	int32_t width, height, cell_width, cell_height, padding, line;
