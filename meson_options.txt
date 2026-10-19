@@ -7,3 +7,9 @@ option('theme',
   type: 'combo',
   choices: ['black', 'white'],
   value: 'black')
+option('font_size',
+  description: 'Size of the font in logical pixels',
+  type: 'integer',
+  min: 6,
+  max: 48,
+  value: 13)

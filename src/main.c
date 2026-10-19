@@ -37,7 +37,6 @@
  */
 constexpr int32_t DEFAULT_WIDTH = 1100;
 constexpr int32_t DEFAULT_HEIGHT = 700;
-constexpr uint32_t FONT_SIZE = 15;
 constexpr int32_t PADDING = 4;
 constexpr uint64_t DRAIN_TIMEOUT_NS = 1'000'000'000;
 

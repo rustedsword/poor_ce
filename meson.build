@@ -32,6 +32,7 @@ add_project_arguments(
 	language: 'c'
 )
 add_project_arguments('-DTHEME_WHITE=@0@'.format((get_option('theme') == 'white').to_int()), language: 'c')
+add_project_arguments('-DFONT_SIZE=@0@'.format(get_option('font_size')), language: 'c')
 
 foreach h: [ 'sys/prctl.h' ]
 	config_h.set('HAVE_' + h.underscorify().to_upper(), cc.has_header(h))
