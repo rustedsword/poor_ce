@@ -88,8 +88,12 @@ uint32_t tree_next(const struct tree *tree, uint32_t node);
 size_t tree_rows(const struct tree *tree);
 /* The node in a row, or TREE_NONE */
 uint32_t tree_row(const struct tree *tree, size_t row);
+/* The row of a node, or SIZE_MAX if it doesn't show */
+size_t tree_row_of(const struct tree *tree, uint32_t node);
 /* The node of an absolute path that was read, or TREE_NONE */
 uint32_t tree_find(const struct tree *tree, const char *path);
+/* The node of a path if it shows, or the last one on the way to it that does, 0 if none does */
+uint32_t tree_nearest(const struct tree *tree, const char *path);
 const char *tree_name(const struct tree *tree, uint32_t node);
 /* The absolute path of a node, false if it doesn't fit */
 [[nodiscard]] bool tree_path_impl(const struct tree *tree, uint32_t node, size_t size, char (*path)[size]);

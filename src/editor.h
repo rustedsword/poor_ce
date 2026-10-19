@@ -134,10 +134,11 @@ struct editor {
 	size_t tree_columns;
 	enum editor_drag drag;
 	enum editor_confirm confirm;
-	bool started, focused, show_tree, quitting;
+	bool started, focused, show_tree, browsing, quitting;
 	char root[PATH_MAX];
 	char status[EDITOR_STATUS];
 	char title[PATH_MAX];
+	char tree_cursor[PATH_MAX];
 	struct editor_tab tabs[EDITOR_TABS];
 };
 
@@ -152,6 +153,9 @@ void editor_resize(struct editor *editor, int32_t width, int32_t height, int32_t
 void editor_layout(struct editor *editor);
 void editor_focus(struct editor *editor, bool focused);
 struct editor_tab *editor_tab(const struct editor *editor);
+bool editor_browsing(const struct editor *editor);
+/* The row that keys move in the tree, TREE_NONE without rows */
+uint32_t editor_tree_cursor(const struct editor *editor);
 /* Where a tab of 'order' shows in the tab bar, false if it doesn't */
 bool editor_tab_extent(const struct editor *editor, size_t index, int32_t *start, int32_t *end);
 /* Returns whether the key repeats */

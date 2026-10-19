@@ -74,6 +74,21 @@ static void solid(struct scene *scene, int32_t x, int32_t y, int32_t width, int3
 	};
 }
 
+static void outline(struct scene *scene, int32_t x, int32_t y, int32_t width, int32_t height, uint32_t color)
+{
+	int32_t line = scene->editor->line;
+
+	solid(scene, x, y, width, line, color);
+	solid(scene, x, y + height - line, width, line, color);
+	solid(scene, x, y + line, line, height - 2 * line, color);
+	solid(scene, x + width - line, y + line, line, height - 2 * line, color);
+}
+
+static bool typing(const struct editor *editor)
+{
+	return editor->focused && !editor_browsing(editor);
+}
+
 static void glyph(struct scene *scene, int32_t x, int32_t y, uint32_t codepoint, uint32_t color)
 {
 	struct frame *frame = scene->frame;
@@ -136,6 +151,7 @@ static void tree(struct scene *scene)
 	const struct editor_rect *rect = &editor->tree_rect;
 	const struct editor_tab *tab = editor_tab(editor);
 	uint32_t active = tab && editor->started ? tree_find(tree, tab->path) : TREE_NONE;
+	uint32_t cursor = editor_browsing(editor) ? editor_tree_cursor(editor) : TREE_NONE;
 	int32_t y = rect->y + editor->padding, end = rect->x + rect->width - editor->padding;
 
 	if (!rect->width)
@@ -156,6 +172,8 @@ static void tree(struct scene *scene)
 		x = rect->x + editor->padding + (n->depth - 1) * editor->cell_width;
 		if (node == active)
 			solid(scene, rect->x, y, rect->width, editor->cell_height, TREE_ACTIVE);
+		if (node == cursor)
+			outline(scene, rect->x, y, rect->width, editor->cell_height, editor->focused ? ACCENT : DIM);
 		if (n->directory && x + editor->cell_width <= end)
 			glyph(scene, x, y, n->expanded ? ARROW_DOWN : ARROW_RIGHT, DIM);
 		label(scene, x + 2 * editor->cell_width, y, end, tree_name(tree, node), TEXT);
@@ -211,7 +229,7 @@ static void selection(struct scene *scene, const struct document *document, size
 	x1 = x + (to - view->left) * editor->cell_width;
 	if (x1 > editor->text_rect.x + editor->text_rect.width)
 		x1 = editor->text_rect.x + editor->text_rect.width;
-	solid(scene, x0, y, x1 - x0, editor->cell_height, editor->focused ? SELECTION : SELECTION_INACTIVE);
+	solid(scene, x0, y, x1 - x0, editor->cell_height, typing(editor) ? SELECTION : SELECTION_INACTIVE);
 }
 
 /* The tokens of 'line', from the returned index to 'end'. None if the line was edited since they came. */
@@ -283,6 +301,7 @@ static const struct {
 	{ { "Ctrl+C", "Copy" }, { "Ctrl+V", "Paste" } },
 	{ { "Ctrl+X", "Cut" }, { "Ctrl+A", "Select all" } },
 	{ { "Ctrl+W", "Close tab" }, { "Ctrl+B", "File tree" } },
+	{ { "Ctrl+E", "Go to tree" }, { "Esc", "Back to text" } },
 	{ { "Ctrl+Tab", "Next tab" }, { "Ctrl+Shift+Tab", "Previous tab" } },
 	{ { "Tab", "Indent" }, { "Shift+Tab", "Outdent" } },
 	{ { "Ctrl+Left/Right", "By words" }, { "Ctrl+Home/End", "File start/end" } },
@@ -375,7 +394,7 @@ static void text(struct scene *scene)
 	    column - view->left < view_columns(view))
 		solid(scene, rect->x + view->padding + (column - view->left) * editor->cell_width,
 		      rect->y + view->padding + (caret_line - view->top) * editor->cell_height, 2 * editor->line, editor->cell_height,
-		      editor->focused ? CARET : DIM);
+		      typing(editor) ? CARET : DIM);
 }
 
 static const char *server_state(const struct lsp *lsp)

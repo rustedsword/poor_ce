@@ -9,6 +9,7 @@
 #include <poor_stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cursor-shape-v1-client-protocol.h"
 #include "editor.h"
@@ -61,6 +62,18 @@ static const char *language(const char *path)
 struct editor_tab *editor_tab(const struct editor *editor)
 {
 	return editor->tab_count ? editor->order[editor->active] : nullptr;
+}
+
+bool editor_browsing(const struct editor *editor)
+{
+	return editor->started && editor->show_tree && (editor->browsing || !editor->tab_count);
+}
+
+uint32_t editor_tree_cursor(const struct editor *editor)
+{
+	uint32_t node = tree_nearest(&editor->tree, editor->tree_cursor);
+
+	return node ? node : tree_next(&editor->tree, 0);
 }
 
 static size_t index_of(const struct editor *editor, const struct editor_tab *tab)
@@ -947,10 +960,137 @@ static bool printable(size_t size, const char (*text)[size])
 	return size;
 }
 
+static size_t tree_visible(const struct editor *editor)
+{
+	return editor->tree_rect.height > editor->padding ? (editor->tree_rect.height - editor->padding) / editor->cell_height : 0;
+}
+
+static void tree_go(struct editor *editor, uint32_t node)
+{
+	struct tree *tree = &editor->tree;
+	size_t row, visible = tree_visible(editor);
+
+	if (node == TREE_NONE)
+		return;
+	if (!tree_path(tree, node, editor->tree_cursor))
+		editor->tree_cursor[0] = 0;
+	row = tree_row_of(tree, node);
+	if (row < tree->top)
+		tree->top = row;
+	else if (visible && row - tree->top >= visible)
+		tree->top = row - visible + 1;
+	changed(editor);
+}
+
+static void tree_move(struct editor *editor, ptrdiff_t rows)
+{
+	const struct tree *tree = &editor->tree;
+	size_t row = tree_row_of(tree, editor_tree_cursor(editor)), count = tree_rows(tree);
+	size_t distance = rows < 0 ? -(size_t)rows : (size_t)rows;
+
+	if (rows < 0)
+		row = distance < row ? row - distance : 0;
+	else
+		row = distance < count - row ? row + distance : count - 1;
+	tree_go(editor, tree_row(tree, row));
+}
+
+static void tree_open(struct editor *editor, uint32_t node)
+{
+	char path[PATH_MAX];
+
+	if (editor->tree.nodes[node].directory) {
+		tree_toggle(&editor->tree, node);
+		changed(editor);
+	} else if (tree_path(&editor->tree, node, path) && tab_open(editor, path)) {
+		editor->browsing = false;
+	}
+}
+
+static void tree_seek(struct editor *editor, size_t size, const char (*text)[size])
+{
+	const struct tree *tree = &editor->tree;
+	uint32_t cursor = editor_tree_cursor(editor), node = cursor;
+
+	do {
+		if ((node = tree_next(tree, node)) == TREE_NONE)
+			node = tree_next(tree, 0);
+	} while (node != cursor && strncasecmp(tree_name(tree, node), *text, size));
+	tree_go(editor, node);
+}
+
+static void browse(struct editor *editor)
+{
+	struct editor_tab *tab = editor_tab(editor);
+
+	editor->browsing = editor->show_tree = true;
+	editor_layout(editor);
+	if (tab && tree_nearest(&editor->tree, tab->path))
+		snprintf_array(editor->tree_cursor, "%s", tab->path);
+	tree_go(editor, editor_tree_cursor(editor));
+	changed(editor);
+}
+
+static void stop_browsing(struct editor *editor)
+{
+	if (!editor->browsing)
+		return;
+	editor->browsing = false;
+	changed(editor);
+}
+
+static bool tree_key(struct editor *editor, xkb_keysym_t sym, size_t size, const char (*text)[size])
+{
+	const struct tree *tree = &editor->tree;
+	uint32_t node = editor_tree_cursor(editor);
+	ptrdiff_t page = tree_visible(editor) > 1 ? tree_visible(editor) - 1 : 1;
+
+	if (sym == XKB_KEY_Escape) {
+		stop_browsing(editor);
+		return false;
+	}
+	if (node == TREE_NONE)
+		return false;
+	tree_go(editor, node);
+	switch (sym) {
+	case XKB_KEY_Up:
+	case XKB_KEY_Down:
+		tree_move(editor, sym == XKB_KEY_Up ? -1 : 1);
+		return true;
+	case XKB_KEY_Page_Up:
+	case XKB_KEY_Page_Down:
+		tree_move(editor, sym == XKB_KEY_Page_Up ? -page : page);
+		return true;
+	case XKB_KEY_Home:
+	case XKB_KEY_End:
+		tree_move(editor, sym == XKB_KEY_Home ? -PTRDIFF_MAX : PTRDIFF_MAX);
+		return false;
+	case XKB_KEY_Right:
+		if (tree->nodes[node].directory && !tree->nodes[node].expanded)
+			tree_open(editor, node);
+		else if (tree->nodes[node].expanded && tree->nodes[node].count)
+			tree_go(editor, tree->nodes[node].first);
+		return true;
+	case XKB_KEY_Left:
+		if (tree->nodes[node].expanded)
+			tree_open(editor, node);
+		else if (tree->nodes[node].parent)
+			tree_go(editor, tree->nodes[node].parent);
+		return true;
+	case XKB_KEY_Return:
+	case XKB_KEY_KP_Enter:
+		tree_open(editor, node);
+		return false;
+	}
+	if (printable(size, text))
+		tree_seek(editor, size, text);
+	return false;
+}
+
 /* Commands with Control, which don't repeat unless they edit */
 static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysym_t sym, bool shift, enum editor_confirm confirm)
 {
-	struct document *document = tab && !tab->loading ? &tab->document : nullptr;
+	struct document *document = tab && !tab->loading && !editor_browsing(editor) ? &tab->document : nullptr;
 
 	switch (sym) {
 	case XKB_KEY_q:
@@ -959,7 +1099,18 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 		return false;
 	case XKB_KEY_b:
 		editor->show_tree = !editor->show_tree;
+		editor->browsing = false;
 		update(editor, true);
+		return false;
+	case XKB_KEY_e:
+		if (editor_browsing(editor))
+			stop_browsing(editor);
+		else if (editor->started)
+			browse(editor);
+		return false;
+	case XKB_KEY_s:
+		if (tab && !tab->loading)
+			tab_save(tab);
 		return false;
 	case XKB_KEY_Tab:
 	case XKB_KEY_ISO_Left_Tab:
@@ -975,9 +1126,6 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 	if (!document)
 		return false;
 	switch (sym) {
-	case XKB_KEY_s:
-		tab_save(tab);
-		return false;
 	case XKB_KEY_z:
 		update(editor, shift ? document_redo(document) : document_undo(document));
 		return true;
@@ -1052,6 +1200,8 @@ bool editor_key(struct editor *editor, xkb_keysym_t sym, uint32_t modifiers, siz
 			jump_forward(editor);
 		return false;
 	}
+	if (editor_browsing(editor))
+		return tree_key(editor, sym, size, text);
 	if (!document)
 		return false;
 	foreach_array_const_ref(motions, entry) {
@@ -1115,19 +1265,17 @@ static uint32_t tree_hit(const struct editor *editor, double y)
 	return row < 0 ? TREE_NONE : tree_row(&editor->tree, editor->tree.top + (size_t)row);
 }
 
+/* Without scrolling, a second click of a double click hits the same row */
 static void tree_click(struct editor *editor, double y)
 {
 	uint32_t node = tree_hit(editor, y);
-	char path[PATH_MAX];
 
 	if (node == TREE_NONE)
 		return;
-	if (editor->tree.nodes[node].directory) {
-		tree_toggle(&editor->tree, node);
-		changed(editor);
-	} else if (tree_path(&editor->tree, node, path)) {
-		tab_open(editor, path);
-	}
+	if (!tree_path(&editor->tree, node, editor->tree_cursor))
+		editor->tree_cursor[0] = 0;
+	editor->browsing = true;
+	tree_open(editor, node);
 }
 
 /* The mark at the end of a tab closes it */
@@ -1207,8 +1355,10 @@ void editor_button(struct editor *editor, double x, double y, uint32_t button, b
 		if (button == BTN_LEFT && editor->started)
 			tree_click(editor, y);
 	} else if (inside(&editor->tabs_rect, x, y)) {
+		stop_browsing(editor);
 		tabs_click(editor, x, button, confirm);
 	} else if (inside(&editor->gutter_rect, x, y) || inside(&editor->text_rect, x, y)) {
+		stop_browsing(editor);
 		text_click(editor, x, y, button, time, modifiers);
 	}
 }
@@ -1250,7 +1400,7 @@ void editor_scroll(struct editor *editor, double x, double y, ptrdiff_t rows, pt
 		if (!editor->started)
 			return;
 		count = tree_rows(tree);
-		visible = editor->tree_rect.height > editor->padding ? (editor->tree_rect.height - editor->padding) / editor->cell_height : 0;
+		visible = tree_visible(editor);
 		if (rows < 0)
 			tree->top = (size_t)-rows < tree->top ? tree->top - (size_t)-rows : 0;
 		else
@@ -1331,10 +1481,11 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	editor->tree_columns = EDITOR_TREE_COLUMNS;
 	editor->drag = EDITOR_IDLE;
 	editor->confirm = EDITOR_NOTHING;
-	editor->focused = editor->quitting = false;
+	editor->focused = editor->browsing = editor->quitting = false;
 	editor->show_tree = true;
 	editor->status[0] = 0;
 	editor->root[0] = 0;
+	editor->tree_cursor[0] = 0;
 	editor->started = false;
 	foreach_array_ref(editor->tabs, tab)
 		tab->used = false;

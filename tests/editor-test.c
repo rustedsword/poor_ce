@@ -1463,3 +1463,267 @@ TEST(editor_tree_follows)
 	unlink(project.path);
 	project_fini(&project);
 }
+
+static bool cursor_is(const char *name)
+{
+	uint32_t node = editor_tree_cursor(&editor);
+
+	return node != TREE_NONE && !strcmp(tree_name(&editor.tree, node), name);
+}
+
+TEST(editor_tree_keys)
+{
+	static struct project project;
+	struct poor_loop loop;
+	struct tree *tree = &editor.tree;
+	struct editor_tab *tab;
+	unsigned pastes = events.pastes;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	run_until(&loop, tree->nodes[0].loaded);
+	assert(editor_browsing(&editor) && cursor_is("sub"));
+	type(&editor, XKB_KEY_Down, 0, "");
+	type(&editor, XKB_KEY_Down, 0, "");
+	type(&editor, XKB_KEY_Down, 0, "");
+	assert(cursor_is("tar get.h"));
+	type(&editor, XKB_KEY_Home, 0, "");
+	type(&editor, XKB_KEY_Right, 0, "");
+	run_until(&loop, rows(tree, "sub", "notes.txt", "main.c", "tar get.h"));
+	assert(cursor_is("sub"));
+	type(&editor, XKB_KEY_Right, 0, "");
+	assert(cursor_is("notes.txt"));
+	type(&editor, XKB_KEY_Left, 0, "");
+	assert(cursor_is("sub"));
+	type(&editor, XKB_KEY_Left, 0, "");
+	assert(rows(tree, "sub", "main.c", "tar get.h") && cursor_is("sub"));
+	type(&editor, XKB_KEY_t, 0, "t");
+	assert(cursor_is("tar get.h"));
+	type(&editor, XKB_KEY_m, SEAT_SHIFT, "M");
+	assert(cursor_is("main.c"));
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	tab = loaded(&editor, &loop);
+	assert(!editor_browsing(&editor) && !strcmp(path_name(tab->path), "main.c"));
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(editor_browsing(&editor) && cursor_is("main.c"));
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Escape, 0, "");
+	assert(!editor_browsing(&editor) && events.pastes == pastes && text_is(tab, "int main(void)\n{\n\treturn x;\n}\n"));
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
+	run_until(&loop, !tab->saving);
+	assert(file_is(&project, "main.c", "xint main(void)\n{\n\treturn x;\n}\n"));
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(!editor_browsing(&editor));
+	type(&editor, XKB_KEY_b, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(editor.show_tree && editor_browsing(&editor));
+	type(&editor, XKB_KEY_b, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_b, SEAT_CONTROL, "");
+	assert(editor.show_tree && !editor_browsing(&editor));
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	click(editor.text_rect.x + 5, editor.text_rect.y + 5, 0);
+	assert(!editor_browsing(&editor));
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_w, SEAT_CONTROL, "");
+	assert(!editor.tab_count && editor_browsing(&editor));
+	type(&editor, XKB_KEY_Up, 0, "");
+	assert(cursor_is("sub"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+TEST(editor_tree_cursor_stays)
+{
+	static struct project project;
+	struct poor_loop loop;
+	struct tree *tree = &editor.tree;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 100, 10, 20, 4, 120);
+	run_until(&loop, tree->nodes[0].loaded);
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	run_until(&loop, rows(tree, "sub", "notes.txt", "main.c", "tar get.h"));
+	type(&editor, XKB_KEY_End, 0, "");
+	assert(cursor_is("tar get.h") && tree->top == 1);
+	type(&editor, XKB_KEY_Page_Up, 0, "");
+	assert(cursor_is("notes.txt") && tree->top == 1);
+	type(&editor, XKB_KEY_Up, 0, "");
+	assert(cursor_is("sub") && !tree->top);
+	type(&editor, XKB_KEY_Page_Down, 0, "");
+	assert(cursor_is("main.c") && !tree->top);
+	write_file(&project, "a.c", "");
+	run_until(&loop, rows(tree, "sub", "notes.txt", "a.c", "main.c", "tar get.h"));
+	assert(cursor_is("main.c"));
+	type(&editor, XKB_KEY_Up, 0, "");
+	type(&editor, XKB_KEY_Up, 0, "");
+	snprintf_array(project.path, "%s/sub/notes.txt", project.root);
+	assert(cursor_is("notes.txt") && !unlink(project.path));
+	run_until(&loop, rows(tree, "sub", "a.c", "main.c", "tar get.h"));
+	assert(cursor_is("sub"));
+	write_file(&project, "sub/notes.txt", "notes\n");
+	run_until(&loop, rows(tree, "sub", "notes.txt", "a.c", "main.c", "tar get.h"));
+	editor_open(&editor, project.path);
+	loaded(&editor, &loop);
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(editor_browsing(&editor) && cursor_is("notes.txt"));
+	type(&editor, XKB_KEY_Left, 0, "");
+	type(&editor, XKB_KEY_Left, 0, "");
+	type(&editor, XKB_KEY_Down, 0, "");
+	type(&editor, XKB_KEY_Escape, 0, "");
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(rows(tree, "sub", "a.c", "main.c", "tar get.h") && cursor_is("sub"));
+	stop(&editor, &loop);
+	snprintf_array(project.path, "%s/a.c", project.root);
+	unlink(project.path);
+	project_fini(&project);
+}
+
+static uint32_t caret_color(struct atlas *atlas, struct frame *frame)
+{
+	scene_build(&editor, atlas, frame);
+	foreach_array_const_ref(arrview_first(frame->count, frame->quads), quad)
+		if (quad->u == QUAD_SOLID && quad->width == 2 * editor.line && quad->height == editor.cell_height)
+			return quad->color;
+	return 0;
+}
+
+static bool framed(struct frame *frame, size_t row, uint32_t color)
+{
+	int32_t y = editor.tree_rect.y + editor.padding + (row - editor.tree.top) * editor.cell_height;
+
+	foreach_array_const_ref(arrview_first(frame->count, frame->quads), quad)
+		if (quad->u == QUAD_SOLID && quad->color == color && quad->x == editor.tree_rect.x && quad->y == y &&
+		    quad->width == editor.tree_rect.width && quad->height == editor.line)
+			return true;
+	return false;
+}
+
+TEST(editor_shows_the_tree_cursor)
+{
+	static struct project project;
+	static struct atlas atlas;
+	static struct frame frame;
+	struct poor_loop loop;
+	struct font font;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_focus(&editor, true);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	loaded(&editor, &loop);
+	run_until(&loop, editor.tree.nodes[0].loaded);
+	assert(caret_color(&atlas, &frame) == QUAD_RGB(THEME_CARET) && !framed(&frame, 1, QUAD_RGB(THEME_ACCENT)));
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(caret_color(&atlas, &frame) == QUAD_RGB(THEME_DIM) && framed(&frame, 1, QUAD_RGB(THEME_ACCENT)));
+	editor_focus(&editor, false);
+	assert(caret_color(&atlas, &frame) == QUAD_RGB(THEME_DIM) && framed(&frame, 1, QUAD_RGB(THEME_DIM)));
+	editor_focus(&editor, true);
+	type(&editor, XKB_KEY_Escape, 0, "");
+	assert(caret_color(&atlas, &frame) == QUAD_RGB(THEME_CARET) && !framed(&frame, 1, QUAD_RGB(THEME_ACCENT)));
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+TEST(editor_tree_keys_show_the_cursor)
+{
+	static struct project project;
+	struct poor_loop loop;
+	struct tree *tree = &editor.tree;
+	char name[16];
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	for (int i = 0; i < 5; i++) {
+		snprintf_array(name, "sub/%d.txt", i);
+		write_file(&project, name, "");
+	}
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 100, 10, 20, 4, 120);
+	run_until(&loop, tree->nodes[0].loaded);
+	type(&editor, XKB_KEY_Right, 0, "");
+	run_until(&loop, tree_rows(tree) == 9);
+	editor_scroll(&editor, 20, editor.tree_rect.y + editor.padding, 10, 0);
+	assert(cursor_is("sub") && tree->top == 6);
+	type(&editor, XKB_KEY_Left, 0, "");
+	assert(rows(tree, "sub", "main.c", "tar get.h") && cursor_is("sub") && !tree->top);
+	stop(&editor, &loop);
+	for (int i = 0; i < 5; i++) {
+		snprintf_array(project.path, "%s/sub/%d.txt", project.root, i);
+		unlink(project.path);
+	}
+	project_fini(&project);
+}
+
+TEST(editor_tree_takes_keys_on_clicks)
+{
+	static struct project project;
+	struct poor_loop loop;
+	struct tree *tree = &editor.tree;
+	struct editor_tab *tab;
+	double row;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tree->nodes[0].loaded);
+	row = editor.tree_rect.y + editor.padding + editor.cell_height / 2;
+	click(20, row, 0);
+	run_until(&loop, rows(tree, "sub", "notes.txt", "main.c", "tar get.h"));
+	assert(editor_browsing(&editor) && cursor_is("sub"));
+	type(&editor, XKB_KEY_Down, 0, "");
+	type(&editor, XKB_KEY_n, 0, "n");
+	assert(cursor_is("notes.txt") && text_is(tab, "int main(void)\n{\n\treturn x;\n}\n"));
+	click(20, row + 2 * editor.cell_height, 0);
+	assert(!editor_browsing(&editor) && editor_tab(&editor) == tab);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+TEST(editor_tree_browses_from_unread_directories)
+{
+	static struct project project;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	run_until(&loop, editor.tree.nodes[0].loaded);
+	type(&editor, XKB_KEY_End, 0, "");
+	snprintf_array(project.path, "%s/sub/notes.txt", project.root);
+	editor_open(&editor, project.path);
+	loaded(&editor, &loop);
+	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
+	assert(editor_browsing(&editor) && cursor_is("sub"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}

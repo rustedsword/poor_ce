@@ -515,32 +515,70 @@ uint32_t tree_row(const struct tree *tree, size_t row)
 	return node;
 }
 
+size_t tree_row_of(const struct tree *tree, uint32_t node)
+{
+	size_t row = 0;
+
+	for (uint32_t at = tree_next(tree, 0); at != TREE_NONE; at = tree_next(tree, at), row++)
+		if (at == node)
+			return row;
+	return SIZE_MAX;
+}
+
 /* How much of the root the paths under it start with, nothing of / */
 static size_t prefix(const struct tree *tree)
 {
 	return strcmp(tree->root, "/") ? strlen(tree->root) : 0;
 }
 
-uint32_t tree_find(const struct tree *tree, const char *path)
+static const char *names(const struct tree *tree, const char *path)
 {
 	size_t root = prefix(tree);
+
+	return strncmp(path, tree->root, root) || path[root] != '/' ? nullptr : path + root + 1;
+}
+
+static uint32_t child(const struct tree *tree, uint32_t directory, const char *name, const char *end)
+{
+	const struct tree_node *n = &tree->nodes[directory];
+
+	if (!n->loaded)
+		return TREE_NONE;
+	foreach_array_index(arrview(n->first, n->count, array_ptr(tree->nodes, TREE_NODES)), i) {
+		const char *other = tree_name(tree, n->first + i);
+
+		if (strlen(other) == (size_t)(end - name) && !memcmp(other, name, end - name))
+			return n->first + i;
+	}
+	return TREE_NONE;
+}
+
+uint32_t tree_find(const struct tree *tree, const char *path)
+{
+	const char *name = names(tree, path), *end;
 	uint32_t node = 0;
 
-	if (strncmp(path, tree->root, root) || path[root] != '/')
+	if (!name)
 		return TREE_NONE;
-	for (const char *name = path + root + 1, *end; node != TREE_NONE && *name; name = *end ? end + 1 : end) {
-		const struct tree_node *directory = &tree->nodes[node];
-
+	for (; node != TREE_NONE && *name; name = *end ? end + 1 : end) {
 		end = strchrnul(name, '/');
-		node = TREE_NONE;
-		if (!directory->loaded)
-			break;
-		foreach_array_index(arrview(directory->first, directory->count, array_ptr(tree->nodes, TREE_NODES)), i) {
-			const char *child = tree_name(tree, directory->first + i);
+		node = child(tree, node, name, end);
+	}
+	return node;
+}
 
-			if (strlen(child) == (size_t)(end - name) && !memcmp(child, name, end - name))
-				node = directory->first + i;
-		}
+uint32_t tree_nearest(const struct tree *tree, const char *path)
+{
+	const char *name = names(tree, path), *end;
+	uint32_t node = 0, next;
+
+	if (!name)
+		return 0;
+	for (; *name && tree->nodes[node].expanded; name = *end ? end + 1 : end) {
+		end = strchrnul(name, '/');
+		if ((next = child(tree, node, name, end)) == TREE_NONE)
+			break;
+		node = next;
 	}
 	return node;
 }
