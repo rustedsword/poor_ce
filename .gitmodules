@@ -13,3 +13,6 @@
 [submodule "refs/language-server-protocol"]
 	path = refs/language-server-protocol
 	url = https://github.com/microsoft/language-server-protocol
+[submodule "subprojects/poor_surface_damage"]
+	path = subprojects/poor_surface_damage
+	url = https://github.com/rustedsword/poor_surface_damage.git

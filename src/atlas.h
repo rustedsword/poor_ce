@@ -22,6 +22,7 @@ struct atlas {
 	struct atlas_glyph glyphs[ATLAS_GLYPHS];
 	size_t count, capacity, columns;
 	size_t dirty_top, dirty_bottom;
+	uint64_t generation;
 	uint8_t pixels[ATLAS_SIZE][ATLAS_SIZE];
 };
 

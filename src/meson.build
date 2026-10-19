@@ -48,6 +48,7 @@ font_sources = files('font.c', 'atlas.c')
 log_sources = files('logger.c')
 seat_sources = files('seat.c')
 render_sources = files('render.c')
+damage_sources = files('damage.c')
 lsp_sources = files('lsp.c')
 editor_sources = files('tree.c', 'editor.c', 'scene.c')
 
@@ -59,12 +60,13 @@ executable(
 	log_sources,
 	seat_sources,
 	render_sources,
+	damage_sources,
 	lsp_sources,
 	editor_sources,
 	client_protocol_h,
 	protocol_c,
 	shaders_h,
-	dependencies: [ swapchain_dep, client_dep, poor_loop_dep, poor_base_dep, vulkan_dep, vulkan_initializers_dep,
-			xkbcommon_dep, freetype_dep, cc.find_library('m', required: false) ],
+	dependencies: [ swapchain_dep, surface_damage_dep, client_dep, poor_loop_dep, poor_base_dep, vulkan_dep,
+			vulkan_initializers_dep, xkbcommon_dep, freetype_dep, cc.find_library('m', required: false) ],
 	install: true,
 )

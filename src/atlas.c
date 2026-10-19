@@ -4,6 +4,7 @@
 void atlas_init(struct atlas *atlas, const struct font *font)
 {
 	atlas->font = font;
+	atlas->generation = 0;
 	atlas_clear(atlas);
 }
 
@@ -16,6 +17,7 @@ void atlas_clear(struct atlas *atlas)
 	atlas->count = 0;
 	atlas->columns = columns;
 	atlas->capacity = slots < ATLAS_GLYPHS / 2 ? slots : ATLAS_GLYPHS / 2;
+	atlas->generation++;
 	atlas_uploaded(atlas);
 }
 

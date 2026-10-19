@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <drm/drm_fourcc.h>
 #include <poll.h>
+#include <poor_damage_buffers.h>
 #include <poor_poll.h>
 #include <poor_stdio.h>
 #include <poor_unistd.h>
@@ -13,6 +14,7 @@
 #include <sys/sysmacros.h>
 #include <vk_init.h>
 
+#include "damage.h"
 #include "editor.h"
 #include "keep-loaded.h"
 #include "logger.h"
@@ -99,7 +101,7 @@ static void readback_fini(struct readback *readback, const struct renderer *rend
 	vkFreeMemory(renderer->device, readback->memory, nullptr);
 }
 
-/* The image comes back from the compositor's queue family, as if it had read it, so the test can copy it */
+/* The image comes back from the compositor's queue family and returns to it, as if the compositor had read it */
 static void read_image(struct renderer *renderer, VkImage image, uint32_t width, uint32_t height, struct readback *readback)
 {
 	auto commands_info = xVkCommandBufferAllocateInfo(
@@ -129,6 +131,16 @@ static void read_image(struct renderer *renderer, VkImage image, uint32_t width,
 			.imageExtent = { width, height, 1 },
 		),
 	);
+	auto release = xVkImageMemoryBarrier2(
+		.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+		.dstStageMask = VK_PIPELINE_STAGE_2_NONE,
+		.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		.newLayout = VK_IMAGE_LAYOUT_GENERAL,
+		.srcQueueFamilyIndex = renderer->family,
+		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
+		.image = image,
+		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
+	);
 	auto host = xVkBufferMemoryBarrier2(
 		.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
 		.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -147,6 +159,7 @@ static void read_image(struct renderer *renderer, VkImage image, uint32_t width,
 	       vkBeginCommandBuffer(commands, &begin) == VK_SUCCESS);
 	vkCmdPipelineBarrier2(commands, &xVkDependencyInfo(.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &acquire));
 	vkCmdCopyImageToBuffer2(commands, &copy);
+	vkCmdPipelineBarrier2(commands, &xVkDependencyInfo(.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &release));
 	vkCmdPipelineBarrier2(commands, &xVkDependencyInfo(.bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &host));
 	auto submit = xVkSubmitInfo2(
 		.commandBufferInfoCount = 1,
@@ -165,7 +178,7 @@ struct target {
 	struct readback readback;
 	struct font font;
 	struct atlas atlas;
-	struct quad quads[RENDER_QUADS];
+	struct frame frame;
 };
 
 /* Without a GPU, as in CI, there is nothing to draw with. The validation layer keeps its log open from the creation of
@@ -200,16 +213,28 @@ static bool target_init(struct target *target, struct poor_loop *loop, uint32_t 
 	return true;
 }
 
-static void target_draw(struct target *target, struct poor_loop *loop, uint32_t background, size_t count)
+static void target_redraw_impl(struct target *target, struct poor_loop *loop, uint32_t background, const struct frame *frame,
+			       size_t rect_count, const struct poor_damage_rect (*rects)[rect_count])
 {
 	struct poor_wl_swapchain_buffer *buffer = &target->swapchain.buffers[0];
 	struct pollfd fence = { .events = POLLIN };
 
-	fence.fd = renderer_draw(&target->renderer, buffer, background, arrview_first(count, target->quads));
+	fence.fd = renderer_draw(&target->renderer, buffer, background, arrview_first(frame->count, frame->quads), rects);
 	assert(fence.fd >= 0 && poll_array(array_ptr(&fence), 5000) == 1);
 	poor_loop_close_fd_or_submit(loop, fence.fd, 0);
 	read_image(&target->renderer, ((struct poor_wl_vulkan_image *)buffer->data)->image, buffer->width, buffer->height,
 		   &target->readback);
+}
+
+#define target_redraw(target, loop, background, frame, rects) \
+	target_redraw_impl(target, loop, background, frame, ARRAY_SIZE(rects), &auto_arr(rects))
+
+static void target_draw(struct target *target, struct poor_loop *loop, uint32_t background, const struct frame *frame)
+{
+	const struct poor_wl_swapchain_buffer *buffer = &target->swapchain.buffers[0];
+	const struct poor_damage_rect whole[] = { { 0, 0, buffer->width, buffer->height } };
+
+	target_redraw(target, loop, background, frame, whole);
 }
 
 static void target_fini(struct target *target, struct poor_loop *loop)
@@ -250,9 +275,10 @@ TEST(render_solid_quads)
 
 	if (!target_init(&target, &loop, 200, 100))
 		return;
-	target.quads[0] = (struct quad){ .x = 20, .y = 10, .width = 30, .height = 40, .u = QUAD_SOLID, .v = 0,
-					 .color = QUAD_RGB(0x3373d6) };
-	target_draw(&target, &loop, QUAD_RGB(0xffffff), 1);
+	target.frame.quads[0] = (struct quad){ .x = 20, .y = 10, .width = 30, .height = 40, .u = QUAD_SOLID, .v = 0,
+					       .color = QUAD_RGB(0x3373d6) };
+	target.frame.count = 1;
+	target_draw(&target, &loop, QUAD_RGB(0xffffff), &target.frame);
 
 	auto pixels = (const uint32_t (*)[100][200])target.readback.map;
 	assert(white((*pixels)[99][199]) && near((*pixels)[10][20], 0x3373d6) && near((*pixels)[49][49], 0x3373d6));
@@ -268,16 +294,44 @@ TEST(render_quads)
 	if (!target_init(&target, &loop, 200, 100))
 		return;
 	assert(atlas_find(&target.atlas, 'a', &u, &v));
-	target.quads[0] = (struct quad){ .x = 20, .y = 10, .width = 30, .height = 40, .u = QUAD_SOLID, .v = 0,
-					 .color = QUAD_RGB(0x3373d6) };
-	target.quads[1] = (struct quad){ .x = 100, .y = 10, .width = target.font.cell_width, .height = target.font.cell_height,
-					 .u = u, .v = v, .color = QUAD_RGB(0x1e1e1e) };
-	target_draw(&target, &loop, QUAD_RGB(0xffffff), 2);
+	target.frame.quads[0] = (struct quad){ .x = 20, .y = 10, .width = 30, .height = 40, .u = QUAD_SOLID, .v = 0,
+					       .color = QUAD_RGB(0x3373d6) };
+	target.frame.quads[1] = (struct quad){ .x = 100, .y = 10, .width = target.font.cell_width,
+					       .height = target.font.cell_height, .u = u, .v = v, .color = QUAD_RGB(0x1e1e1e) };
+	target.frame.count = 2;
+	target_draw(&target, &loop, QUAD_RGB(0xffffff), &target.frame);
 
 	auto pixels = (const uint32_t (*)[100][200])target.readback.map;
 	assert(white((*pixels)[99][199]) && white((*pixels)[9][20]) && white((*pixels)[10][50]));
 	assert(near((*pixels)[10][20], 0x3373d6) && near((*pixels)[49][49], 0x3373d6));
 	assert(cell_has(100, 200, pixels, 100, 10, &target.font, dark) && cell_has(100, 200, pixels, 100, 10, &target.font, white));
+	target_fini(&target, &loop);
+}
+
+TEST(render_redraws_rects)
+{
+	static struct target target;
+	static struct frame moved;
+	static uint32_t redrawn[100][200];
+	const struct poor_damage_rect rects[] = { { 10, 10, 20, 20 }, { 120, 60, 20, 20 } };
+	struct poor_loop loop;
+
+	if (!target_init(&target, &loop, 200, 100))
+		return;
+	target.frame.quads[0] = (struct quad){ .x = 0, .y = 0, .width = 200, .height = 100, .u = QUAD_SOLID, .v = 0,
+					       .color = QUAD_RGB(0xeeeeee) };
+	target.frame.quads[1] = (struct quad){ .x = 10, .y = 10, .width = 20, .height = 20, .u = QUAD_SOLID, .v = 0,
+					       .color = QUAD_RGB(0x3373d6) };
+	target.frame.count = 2;
+	target_draw(&target, &loop, QUAD_RGB(0xffffff), &target.frame);
+	moved = target.frame;
+	moved.quads[1].x = 120;
+	moved.quads[1].y = 60;
+	target_redraw(&target, &loop, QUAD_RGB(0xffffff), &moved, rects);
+	copy_array(redrawn, *(const uint32_t (*)[100][200])target.readback.map);
+	target_draw(&target, &loop, QUAD_RGB(0xffffff), &moved);
+	assert(near(redrawn[15][15], 0xeeeeee) && near(redrawn[65][125], 0x3373d6));
+	assert(!memcmp(redrawn, target.readback.map, sizeof(redrawn)));
 	target_fini(&target, &loop);
 }
 
@@ -332,6 +386,44 @@ static bool teal(uint32_t pixel)
 	return (pixel & 0xff) > (pixel >> 16 & 0xff) + 0x30;
 }
 
+struct sample {
+	char root[sizeof("/tmp/render-test-XXXXXX")];
+	char path[PATH_MAX], directory[PATH_MAX];
+};
+
+static void sample_open(struct sample *sample, struct editor *editor, struct editor_memory *memory, struct target *target,
+			struct poor_loop *loop)
+{
+	static const char source[] = "int x;\n/* comment */\nstatic char *name = \"text\";\n";
+	const struct editor_tab *tab;
+
+	snprintf_array(sample->root, "/tmp/render-test-XXXXXX");
+	assert(mkdtemp(sample->root));
+	write_file(sample->root, "sample.c", source);
+	snprintf_array(sample->directory, "%s/include", sample->root);
+	assert(!mkdir(sample->directory, 0755));
+	write_file(sample->directory, "sample.h", "#pragma once\n");
+	snprintf_array(sample->path, "%s/sample.c", sample->root);
+	editor_init(editor, loop, &editor_listener, memory);
+	editor_start(editor, sample->root, nullptr);
+	editor_resize(editor, 640, 320, target->font.cell_width, target->font.cell_height, 4, 120);
+	editor_focus(editor, true);
+	editor_open(editor, sample->path);
+	run_until(loop, (tab = editor_tab(editor)) && !tab->loading && editor->tree.nodes[0].loaded);
+	editor_layout(editor);
+}
+
+static void sample_close(struct sample *sample, struct editor *editor, struct poor_loop *loop)
+{
+	editor_stop(editor);
+	run_until(loop, !editor_busy(editor));
+	unlink(sample->path);
+	snprintf_array(sample->path, "%s/include/sample.h", sample->root);
+	unlink(sample->path);
+	rmdir(sample->directory);
+	rmdir(sample->root);
+}
+
 /*
  * The editor with the tree of a directory and a C file in a tab: the panels and the caret have the colors of the theme,
  * the caret is at the start of the line it stands out on, and types are teal.
@@ -341,28 +433,15 @@ TEST(render_editor)
 	static struct target target;
 	static struct editor editor;
 	static struct editor_memory memory;
-	static const char source[] = "int x;\n/* comment */\nstatic char *name = \"text\";\n";
-	char root[] = "/tmp/render-test-XXXXXX", path[PATH_MAX], directory[PATH_MAX];
-	const struct editor_tab *tab;
+	struct sample sample;
 	struct poor_loop loop;
 	int32_t x, y;
 
 	if (!target_init(&target, &loop, 640, 320))
 		return;
-	assert(mkdtemp(root));
-	write_file(root, "sample.c", source);
-	snprintf_array(directory, "%s/include", root);
-	assert(!mkdir(directory, 0755));
-	write_file(directory, "sample.h", "#pragma once\n");
-	snprintf_array(path, "%s/sample.c", root);
-	editor_init(&editor, &loop, &editor_listener, &memory);
-	editor_start(&editor, root, nullptr);
-	editor_resize(&editor, 640, 320, target.font.cell_width, target.font.cell_height, 4, 120);
-	editor_focus(&editor, true);
-	editor_open(&editor, path);
-	run_until(&loop, (tab = editor_tab(&editor)) && !tab->loading && editor.tree.nodes[0].loaded);
-	editor_layout(&editor);
-	target_draw(&target, &loop, SCENE_BACKGROUND, scene_build(&editor, &target.atlas, target.quads));
+	sample_open(&sample, &editor, &memory, &target, &loop);
+	scene_build(&editor, &target.atlas, &target.frame);
+	target_draw(&target, &loop, SCENE_BACKGROUND, &target.frame);
 
 	auto pixels = (const uint32_t (*)[320][640])target.readback.map;
 	snapshot(320, 640, pixels);
@@ -372,12 +451,58 @@ TEST(render_editor)
 	assert(near((*pixels)[y + target.font.cell_height / 2][x], THEME_CARET));
 	assert(near((*pixels)[y + target.font.cell_height / 2][630], THEME_CURRENT_LINE));
 	assert(cell_has(320, 640, pixels, x + target.font.cell_width, y, &target.font, teal));
-	editor_stop(&editor);
-	run_until(&loop, !editor_busy(&editor));
-	unlink(path);
-	snprintf_array(path, "%s/include/sample.h", root);
-	unlink(path);
-	rmdir(directory);
-	rmdir(root);
+	sample_close(&sample, &editor, &loop);
+	target_fini(&target, &loop);
+}
+
+poor_damage_buffers_declare(one_buffer, 1, DAMAGE_RECTS);
+
+static bool has_rect(const struct damage_region *region, int32_t x, int32_t y, int32_t width, int32_t height)
+{
+	foreach_array_const_ref(arrview_first(region->count, region->rects), rect)
+		if (rect->x == x && rect->y == y && rect->width == width && rect->height == height)
+			return true;
+	return false;
+}
+
+TEST(render_redraws_changes)
+{
+	static struct target target;
+	static struct editor editor;
+	static struct editor_memory memory;
+	static struct frame shown;
+	static uint32_t redrawn[320][640];
+	const struct editor_rect *gutter = &editor.gutter_rect, *status = &editor.status_rect;
+	struct damage_region changes, redraws;
+	struct one_buffer damage;
+	const char *none = "";
+	struct sample sample;
+	struct poor_loop loop;
+	int32_t y, digit;
+
+	if (!target_init(&target, &loop, 640, 320))
+		return;
+	sample_open(&sample, &editor, &memory, &target, &loop);
+	poor_damage_buffers_init(&damage, 640, 320);
+	scene_build(&editor, &target.atlas, &shown);
+	damage_diff(nullptr, &shown, &changes);
+	target_draw(&target, &loop, SCENE_BACKGROUND, &shown);
+	poor_damage_buffers_drawn(&damage, 0, &changes);
+	editor_key(&editor, XKB_KEY_Down, 0, strlen(none), array_ptr(none, strlen(none)));
+	editor_layout(&editor);
+	scene_build(&editor, &target.atlas, &target.frame);
+	damage_diff(&shown, &target.frame, &changes);
+	y = editor.text_rect.y + editor.padding;
+	digit = status->x + status->width - editor.padding - (int32_t)strlen("Ln 2, Col 1") * editor.cell_width +
+		3 * editor.cell_width;
+	assert(changes.count == 2 && has_rect(&changes, gutter->x, y, gutter->width + editor.text_rect.width, 2 * editor.cell_height));
+	assert(has_rect(&changes, digit, status->y + editor.padding, editor.cell_width, editor.cell_height));
+	poor_damage_buffers_get(&damage, 0, &redraws);
+	poor_damage_region_add_region(&redraws, &changes);
+	target_redraw(&target, &loop, SCENE_BACKGROUND, &target.frame, arrview_first(redraws.count, redraws.rects));
+	copy_array(redrawn, *(const uint32_t (*)[320][640])target.readback.map);
+	target_draw(&target, &loop, SCENE_BACKGROUND, &target.frame);
+	assert(!memcmp(redrawn, target.readback.map, sizeof(redrawn)));
+	sample_close(&sample, &editor, &loop);
 	target_fini(&target, &loop);
 }

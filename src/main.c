@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 
+#include <assert.h>
 #include <drm/drm_fourcc.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <poor_damage_buffers.h>
 #include <poor_loop.h>
 #include <poor_loop_fd.h>
 #include <poor_loop_uring_array.h>
@@ -15,6 +17,7 @@
 #include <sys/signalfd.h>
 #include <unistd.h>
 
+#include "damage.h"
 #include "editor.h"
 #include "fractional-scale-v1-client-protocol.h"
 #include "logger.h"
@@ -41,6 +44,7 @@ constexpr uint64_t DRAIN_TIMEOUT_NS = 1'000'000'000;
 static const char *const SERVER[] = { "clangd", "--log=error", nullptr };
 
 poor_loop_fd_declare(signal_file);
+poor_damage_buffers_declare(buffer_damage, POOR_WL_SWAPCHAIN_BUFFERS, DAMAGE_RECTS);
 
 struct app {
 	struct poor_loop loop;
@@ -62,6 +66,8 @@ struct app {
 	struct poor_wp_viewport viewport;
 	struct poor_wl_swapchain swapchain;
 	struct renderer renderer;
+	struct frame *shown;
+	struct buffer_damage damage;
 	struct font font;
 	struct seat seat;
 	signal_file signals;
@@ -92,7 +98,7 @@ static struct atlas atlas;
 static struct editor editor;
 static struct editor_memory editor_memory;
 static struct seat_memory seat_memory;
-static struct quad quads[RENDER_QUADS];
+static struct frame frames[2];
 static struct app app;
 
 poor_loop_group_attach(signal_file, struct app, signals, signal_op, on_signal);
@@ -112,7 +118,7 @@ static void app_teardown(struct app *app)
 {
 	seat_fini(&app->seat);
 	if (app->swapchain_started)
-		poor_wl_swapchain_destroy(&app->swapchain, swapchain_done);
+		poor_wl_swapchain_destroy(&app->swapchain);
 	if (app->have_renderer)
 		renderer_fini(&app->renderer);
 	if (app->drm_fd >= 0)
@@ -179,6 +185,7 @@ static void app_layout(struct app *app)
 	editor_resize(&editor, width, height, app->font.cell_width, app->font.cell_height, scaled(PADDING, app->scale), app->scale);
 	seat_resize(&app->seat, app->scale, app->font.cell_width, app->font.cell_height);
 	app->viewport_changed = true;
+	poor_damage_buffers_init(&app->damage, width, height);
 	poor_wl_swapchain_resize(&app->swapchain, width, height);
 	app_changed(app);
 }
@@ -346,18 +353,43 @@ static void swapchain_device(struct poor_wl_swapchain *swapchain, dev_t device)
 			     O_RDWR | O_CLOEXEC, 0);
 }
 
+static void present(struct poor_wl_swapchain *swapchain, struct poor_wl_swapchain_buffer *buffer, int fence,
+		    const struct damage_region *changes)
+{
+	struct poor_wl_swapchain_rect rects[DAMAGE_RECTS];
+
+	foreach_array_index(arrview_first(changes->count, changes->rects), i)
+		rects[i] = (struct poor_wl_swapchain_rect){ changes->rects[i].x, changes->rects[i].y, changes->rects[i].width,
+							   changes->rects[i].height };
+	poor_wl_swapchain_present_damage(swapchain, buffer, fence, arrview_first(changes->count, rects));
+}
+
 /* A frame shows the view as it is now, the next one comes when something changes */
-static void swapchain_frame(struct poor_wl_swapchain *swapchain, struct poor_wl_swapchain_buffer *buffer, uint32_t)
+static void swapchain_frame(struct poor_wl_swapchain *swapchain, uint32_t)
 {
 	struct app *app = app_of_swapchain(swapchain);
-	size_t count;
+	struct frame *frame = app->shown == &frames[0] ? &frames[1] : &frames[0];
+	struct poor_wl_swapchain_buffer *buffer;
+	struct damage_region changes, redraws;
+	size_t index;
 	int fence;
 
 	if (app->closing)
 		return;
 	editor_layout(&editor);
-	count = scene_build(&editor, &atlas, quads);
-	fence = renderer_draw(&app->renderer, buffer, SCENE_BACKGROUND, arrview_first(count, quads));
+	scene_build(&editor, &atlas, frame);
+	damage_diff(app->viewport_changed ? nullptr : app->shown, frame, &changes);
+	if (!changes.count)
+		return;
+	buffer = poor_wl_swapchain_acquire(swapchain);
+	assert(buffer);
+	index = array_ref_index(swapchain->buffers, buffer);
+	if (!buffer->age)
+		poor_damage_buffers_forget(&app->damage, index);
+	poor_damage_buffers_get(&app->damage, index, &redraws);
+	poor_damage_region_add_region(&redraws, &changes);
+	fence = renderer_draw(&app->renderer, buffer, SCENE_BACKGROUND, arrview_first(frame->count, frame->quads),
+			      arrview_first(redraws.count, redraws.rects));
 	if (fence < 0) {
 		app_quit(app, 1);
 		return;
@@ -365,7 +397,9 @@ static void swapchain_frame(struct poor_wl_swapchain *swapchain, struct poor_wl_
 	if (app->viewport_changed && app->have_viewporter)
 		poor_wp_viewport_set_destination(&app->viewport, app->width, app->height);
 	app->viewport_changed = false;
-	poor_wl_swapchain_present(swapchain, buffer, fence);
+	present(swapchain, buffer, fence, &changes);
+	poor_damage_buffers_drawn(&app->damage, index, &changes);
+	app->shown = frame;
 }
 
 static void swapchain_error(struct poor_wl_swapchain *swapchain, int error)
@@ -373,6 +407,13 @@ static void swapchain_error(struct poor_wl_swapchain *swapchain, int error)
 	log_printf("ce: swapchain: %s\n", strerror(error));
 	app_quit(app_of_swapchain(swapchain), 1);
 }
+
+static const struct poor_wl_swapchain_listener swapchain_listener = {
+	.device = swapchain_device,
+	.frame = swapchain_frame,
+	.error = swapchain_error,
+	.done = swapchain_done,
+};
 
 static void shell_surface_configure(void *data, struct poor_xdg_surface *shell_surface, uint32_t serial)
 {
@@ -550,7 +591,7 @@ static void window_init(struct app *app)
 		poor_wp_fractional_scale_v1_add_listener(&app->fractional, &fractional_listener, app);
 	}
 	poor_wl_swapchain_init(&app->swapchain, &app->loop, &app->dmabuf, &app->surface, ((const uint32_t[]){ RENDER_DRM_FORMAT }),
-			       swapchain_device, swapchain_frame, swapchain_error);
+			       &swapchain_listener);
 	app->swapchain_started = true;
 	poor_wl_surface_commit(&app->surface);
 }
@@ -636,6 +677,7 @@ static void app_prepare(struct app *app)
 		transfer->used = false;
 	app->seat.paste.busy = false;
 	editor_init(&editor, &app->loop, &editor_listener, &editor_memory);
+	app->shown = nullptr;
 }
 
 /*

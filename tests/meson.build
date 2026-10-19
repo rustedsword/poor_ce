@@ -29,6 +29,12 @@ test(
 	env: [ 'TEST_BUILD_DIR=@0@'.format(meson.current_build_dir()) ],
 )
 
+test(
+	'damage-test',
+	executable('damage-test', 'damage-test.c', damage_sources, dependencies: [ test_runner_dep, surface_damage_dep ]),
+	env: [ 'TEST_BUILD_DIR=@0@'.format(meson.current_build_dir()) ],
+)
+
 input_test = executable(
 	'input-test',
 	'input-test.c',
@@ -72,12 +78,13 @@ render_test = executable(
 	font_sources,
 	log_sources,
 	render_sources,
+	damage_sources,
 	lsp_sources,
 	editor_sources,
 	shaders_h,
 	client_protocol_h,
-	dependencies: [ test_runner_dep, swapchain_dep, client_dep, poor_loop_dep, vulkan_dep, vulkan_initializers_dep,
-			freetype_dep, xkbcommon_dep, cc.find_library('m', required: false) ],
+	dependencies: [ test_runner_dep, swapchain_dep, surface_damage_dep, client_dep, poor_loop_dep, vulkan_dep,
+			vulkan_initializers_dep, freetype_dep, xkbcommon_dep, cc.find_library('m', required: false) ],
 )
 fake_lsp = executable('fake-lsp', 'fake-lsp.c', dependencies: [ poor_base_dep ])
 lsp_test = executable('lsp-test', 'lsp-test.c', text_sources, log_sources, lsp_sources,

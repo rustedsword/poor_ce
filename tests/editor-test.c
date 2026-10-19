@@ -904,12 +904,11 @@ TEST(editor_hides_far_caret)
 {
 	static struct project project;
 	static struct atlas atlas;
-	static struct quad quads[4096];
+	static struct frame frame;
 	static char contents[8001];
 	struct editor_tab *tab;
 	struct poor_loop loop;
 	struct font font;
-	size_t count;
 
 	loop_init(&loop);
 	log_init(&loop, "editor-test");
@@ -928,9 +927,9 @@ TEST(editor_hides_far_caret)
 	assert(document_place(&tab->document, (UINT16_MAX + 1 + 100) / editor.cell_width, false));
 	editor_scroll(&editor, editor.text_rect.x + 1, editor.text_rect.y + 1, 0, -100000);
 	assert(!tab->document.view.left);
-	count = scene_build(&editor, &atlas, quads);
-	assert(count < ARRAY_SIZE(quads));
-	foreach_array_const_ref(arrview_first(count, quads), quad)
+	scene_build(&editor, &atlas, &frame);
+	assert(frame.count < ARRAY_SIZE(frame.quads));
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad)
 		assert(quad->u != QUAD_SOLID || quad->color != QUAD_RGB(THEME_CARET));
 	stop(&editor, &loop);
 	font_fini(&font);
@@ -940,13 +939,13 @@ TEST(editor_hides_far_caret)
 /* The color of the character at 'column' of 'line' of the shown document */
 static uint32_t color_at(struct atlas *atlas, size_t line, size_t column)
 {
-	static struct quad quads[4096];
+	static struct frame frame;
 	const struct view *view = &editor_tab(&editor)->document.view;
 	int32_t x = editor.text_rect.x + view->padding + (column - view->left) * editor.cell_width;
 	int32_t y = editor.text_rect.y + view->padding + (line - view->top) * editor.cell_height;
-	size_t count = scene_build(&editor, atlas, quads);
 
-	foreach_array_const_ref(arrview_first(count, quads), quad)
+	scene_build(&editor, atlas, &frame);
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad)
 		if (quad->u != QUAD_SOLID && quad->x == x && quad->y == y)
 			return quad->color;
 	return 0;

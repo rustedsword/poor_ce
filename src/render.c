@@ -110,7 +110,7 @@ static bool target_init(struct renderer *renderer, struct render_target *target,
 	return check(vkCreateImageView(renderer->device, &view_info, nullptr, &target->view), "vkCreateImageView") &&
 	       check(vkAllocateCommandBuffers(renderer->device, &commands_info, &target->commands), "vkAllocateCommandBuffers") &&
 	       check(vkCreateFence(renderer->device, &fence_info, nullptr, &target->done), "vkCreateFence") &&
-	       buffer_init(renderer, RENDER_QUADS * sizeof(struct quad), VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT,
+	       buffer_init(renderer, FRAME_QUADS * sizeof(struct quad), VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT,
 			   &target->instances, &target->instance_memory, &target->instance_map) &&
 	       buffer_init(renderer, ATLAS_SIZE * ATLAS_SIZE, VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT, &target->staging,
 			   &target->staging_memory, &target->staging_map);
@@ -481,11 +481,37 @@ static void upload_atlas(struct renderer *renderer, struct render_target *target
 	atlas_uploaded(atlas);
 }
 
-static void draw_quads(struct renderer *renderer, struct render_target *target, const struct poor_wl_swapchain_buffer *buffer,
-		       size_t count)
+static bool reaches(const VkRect2D *area, const struct quad *quad)
+{
+	return quad->x < area->offset.x + (int32_t)area->extent.width && quad->x + quad->width > area->offset.x &&
+	       quad->y < area->offset.y + (int32_t)area->extent.height && quad->y + quad->height > area->offset.y;
+}
+
+static VkRect2D rect_of(const struct poor_damage_rect *rect)
+{
+	return (VkRect2D){ { rect->x, rect->y }, { (uint32_t)rect->width, (uint32_t)rect->height } };
+}
+
+static VkRect2D bounds_impl(size_t count, const struct poor_damage_rect (*rects)[count])
+{
+	int32_t left = INT32_MAX, top = INT32_MAX, right = INT32_MIN, bottom = INT32_MIN;
+
+	foreach_array_const_ref(rects, rect) {
+		left = rect->x < left ? rect->x : left;
+		top = rect->y < top ? rect->y : top;
+		right = rect->x + rect->width > right ? rect->x + rect->width : right;
+		bottom = rect->y + rect->height > bottom ? rect->y + rect->height : bottom;
+	}
+	return (VkRect2D){ { left, top }, { (uint32_t)(right - left), (uint32_t)(bottom - top) } };
+}
+
+#define bounds(rects) bounds_impl(ARRAY_SIZE(rects), &auto_arr(rects))
+
+static void draw_rects_impl(struct renderer *renderer, struct render_target *target,
+			    const struct poor_wl_swapchain_buffer *buffer, size_t count, const VkClearAttachment *clear,
+			    size_t rect_count, const struct poor_damage_rect (*rects)[rect_count])
 {
 	VkViewport viewport = { .width = buffer->width, .height = buffer->height, .maxDepth = 1.0f };
-	VkRect2D scissor = { .extent = { buffer->width, buffer->height } };
 	VkDeviceSize offset = 0;
 	VkDescriptorImageInfo atlas = { .imageView = renderer->atlas_view, .imageLayout = VK_IMAGE_LAYOUT_GENERAL };
 	auto descriptors = xVkPushDescriptorSetInfo(
@@ -511,34 +537,62 @@ static void draw_quads(struct renderer *renderer, struct render_target *target, 
 		.pValues = &constants,
 	);
 
-	vkCmdBindPipeline(target->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipeline);
-	vkCmdPushDescriptorSet2(target->commands, &descriptors);
-	vkCmdSetViewport(target->commands, 0, 1, &viewport);
-	vkCmdSetScissor(target->commands, 0, 1, &scissor);
-	vkCmdPushConstants2(target->commands, &push);
-	vkCmdBindVertexBuffers2(target->commands, 0, 1, &target->instances, &offset, nullptr, nullptr);
-	vkCmdDraw(target->commands, 4, count, 0, 0);
+	if (count) {
+		vkCmdBindPipeline(target->commands, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipeline);
+		vkCmdPushDescriptorSet2(target->commands, &descriptors);
+		vkCmdSetViewport(target->commands, 0, 1, &viewport);
+		vkCmdPushConstants2(target->commands, &push);
+		vkCmdBindVertexBuffers2(target->commands, 0, 1, &target->instances, &offset, nullptr, nullptr);
+	}
+	foreach_array_const_ref(rects, rect) {
+		VkRect2D scissor = rect_of(rect);
+
+		if (clear)
+			vkCmdClearAttachments(target->commands, 1, clear, 1, &(VkClearRect){ .rect = scissor, .layerCount = 1 });
+		if (!count)
+			continue;
+		vkCmdSetScissor(target->commands, 0, 1, &scissor);
+		vkCmdDraw(target->commands, 4, count, 0, 0);
+	}
 }
 
+#define draw_rects(renderer, target, buffer, count, clear, rects) \
+	draw_rects_impl(renderer, target, buffer, count, clear, ARRAY_SIZE(rects), &auto_arr(rects))
+
 /*
- * The old contents of the image don't matter. It goes to the queue family of the compositor, which reads it once
- * the fence of the batch signals. The compositor was done with the buffer, and so was the last batch that drew it,
- * which Vulkan learns from the fence of that batch.
+ * Unless the rect covers the image, it comes back with its contents from the queue family of the compositor. It goes
+ * to that queue family, which reads it once the fence of the batch signals. The compositor was done with the buffer,
+ * and so was the last batch that drew it, which Vulkan learns from the fence of that batch.
  */
 int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffer *buffer, uint32_t background,
-		       size_t count, const struct quad (*quads)[count])
+		       size_t count, const struct quad (*quads)[count], size_t rect_count,
+		       const struct poor_damage_rect (*rects)[rect_count])
 {
 	struct render_target *target = target_of(renderer, buffer);
 	VkImage image = ((struct poor_wl_vulkan_image *)buffer->data)->image;
+	const struct poor_damage_rect *first = array_first_ref(rects);
+	bool whole = rect_count == 1 && !first->x && !first->y && first->width == buffer->width && first->height == buffer->height;
+	VkRect2D area = bounds(rects);
+	auto instances = (struct quad (*)[FRAME_QUADS])target->instance_map;
+	size_t drawn = 0;
+	VkClearAttachment clear = {
+		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		.clearValue = { .color = { .float32 = {
+			(background & 0xff) / 255.0f,
+			(background >> 8 & 0xff) / 255.0f,
+			(background >> 16 & 0xff) / 255.0f,
+			1.0f,
+		} } },
+	};
 	auto begin = xVkCommandBufferBeginInfo(.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 	auto draw = xVkImageMemoryBarrier2(
 		.srcStageMask = VK_PIPELINE_STAGE_2_NONE,
 		.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-		.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-		.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+		.oldLayout = whole ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
 		.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		.srcQueueFamilyIndex = whole ? VK_QUEUE_FAMILY_IGNORED : VK_QUEUE_FAMILY_FOREIGN_EXT,
+		.dstQueueFamilyIndex = whole ? VK_QUEUE_FAMILY_IGNORED : renderer->family,
 		.image = image,
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
 	);
@@ -554,20 +608,15 @@ int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffe
 		.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
 	);
 	auto rendering = xVkRenderingInfo(
-		.renderArea = { .extent = { (uint32_t)buffer->width, (uint32_t)buffer->height } },
+		.renderArea = area,
 		.layerCount = 1,
 		.colorAttachmentCount = 1,
 		.pColorAttachments = &xVkRenderingAttachmentInfo(
 			.imageView = target->view,
 			.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+			.loadOp = whole ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
 			.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-			.clearValue = { .color = { .float32 = {
-				(background & 0xff) / 255.0f,
-				(background >> 8 & 0xff) / 255.0f,
-				(background >> 16 & 0xff) / 255.0f,
-				1.0f,
-			} } },
+			.clearValue = clear.clearValue,
 		),
 	);
 	auto submit = xVkSubmitInfo2(
@@ -585,12 +634,14 @@ int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffe
 	);
 	int fence;
 
-	assert(count <= RENDER_QUADS);
+	assert(count <= FRAME_QUADS && rect_count);
 	if (vkGetFenceStatus(renderer->device, target->done) != VK_SUCCESS) {
 		log_printf("ce: a buffer came back before its drawing was done\n");
 		return -1;
 	}
-	copy_array(arrview_first(count, (struct quad (*)[RENDER_QUADS])target->instance_map), quads);
+	foreach_array_const_ref(quads, quad)
+		if (whole || reaches(&area, quad))
+			(*instances)[drawn++] = *quad;
 	if (!check(vkResetFences(renderer->device, 1, &target->done), "vkResetFences") ||
 	    !check(vkBeginCommandBuffer(target->commands, &begin), "vkBeginCommandBuffer"))
 		return -1;
@@ -598,8 +649,7 @@ int renderer_draw_impl(struct renderer *renderer, struct poor_wl_swapchain_buffe
 		upload_atlas(renderer, target);
 	image_barrier(target->commands, &draw);
 	vkCmdBeginRendering(target->commands, &rendering);
-	if (count)
-		draw_quads(renderer, target, buffer, count);
+	draw_rects(renderer, target, buffer, drawn, whole ? nullptr : &clear, rects);
 	vkCmdEndRendering(target->commands);
 	image_barrier(target->commands, &release);
 	if (!check(vkEndCommandBuffer(target->commands), "vkEndCommandBuffer") ||

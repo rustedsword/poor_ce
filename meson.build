@@ -50,9 +50,11 @@ if not cc.has_header_symbol('drm/drm.h', 'DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_TIMELIN
 	error('the swapchain needs the kernel headers of Linux 6.16 or newer')
 endif
 
-# Installed poor_wayland, poor_wayland_swapchain and wayland-protocols are used if there are, the submodules otherwise
+# Installed poor_wayland, poor_wayland_swapchain, poor_surface_damage and wayland-protocols are used if there are, the
+# submodules otherwise
 swapchain_dep = dependency('poor_wayland_swapchain_vulkan', fallback: 'poor_wayland_swapchain',
 	default_options: [ 'tests=false', 'examples=false' ])
+surface_damage_dep = dependency('poor_surface_damage', fallback: 'poor_surface_damage')
 client_dep = dependency('poor_wayland_client', fallback: 'poor_wayland', default_options: [ 'tests=false' ])
 scanner_dep = dependency('poor_wayland_scanner', native: true, fallback: 'poor_wayland', default_options: [ 'tests=false' ])
 scanner = find_program(scanner_dep.get_variable('poor_wayland_scanner'), native: true)

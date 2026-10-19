@@ -4,13 +4,12 @@
 
 #include "atlas.h"
 #include "editor.h"
-#include "quad.h"
+#include "frame.h"
 #include "theme.h"
 
 constexpr uint32_t SCENE_BACKGROUND = QUAD_RGB(THEME_BACKGROUND);
 
-/* The quads of everything that shows, how many of them there are. A full atlas starts over once. */
-size_t scene_build_impl(const struct editor *editor, struct atlas *atlas, size_t capacity, struct quad (*quads)[capacity]);
-#define scene_build(editor, atlas, quads) scene_build_impl(editor, atlas, ARRAY_SIZE(quads), &auto_arr(quads))
+/* The quads of everything that shows. A full atlas starts over once. */
+void scene_build(const struct editor *editor, struct atlas *atlas, struct frame *frame);
 
 #endif
