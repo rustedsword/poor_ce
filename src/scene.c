@@ -295,7 +295,7 @@ static const struct {
 	const char *keys, *action;
 } KEYS[][2] = {
 	{ { "Ctrl+S", "Save" }, { "Ctrl+Q", "Quit" } },
-	{ { "F12", "Definition" }, { "Shift+F12", "Declaration" } },
+	{ { "Ctrl+Enter", "Definition" }, { "Ctrl+Shift+Enter", "Declaration" } },
 	{ { "Alt+Left", "Back" }, { "Alt+Right", "Forward" } },
 	{ { "Ctrl+Z", "Undo" }, { "Ctrl+Shift+Z", "Redo" } },
 	{ { "Ctrl+C", "Copy" }, { "Ctrl+V", "Paste" } },

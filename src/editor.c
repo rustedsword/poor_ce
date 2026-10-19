@@ -1126,6 +1126,10 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 	if (!document)
 		return false;
 	switch (sym) {
+	case XKB_KEY_Return:
+	case XKB_KEY_KP_Enter:
+		locate(editor, shift);
+		return false;
 	case XKB_KEY_z:
 		update(editor, shift ? document_redo(document) : document_undo(document));
 		return true;
@@ -1213,9 +1217,6 @@ bool editor_key(struct editor *editor, xkb_keysym_t sym, uint32_t modifiers, siz
 		return true;
 	}
 	switch (sym) {
-	case XKB_KEY_F12:
-		locate(editor, shift);
-		return false;
 	case XKB_KEY_Escape:
 		update(editor, document_place(document, document->view.caret, false));
 		return false;

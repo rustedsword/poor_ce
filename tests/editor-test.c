@@ -411,14 +411,14 @@ TEST(editor_waits_for_room)
 	editor_open(&editor, project.path);
 	tab = loaded(&editor, &loop);
 	type(&editor, XKB_KEY_x, 0, "x");
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(editor.request && tab->lsp_version == tab->document.version);
 	version = tab->lsp_version;
 	type(&editor, XKB_KEY_y, 0, "y");
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(!editor.request && tab->lsp_version == version && strstr(editor.status, "can't take big.c now"));
 	run_until(&loop, !editor.lsp.write_op.pending);
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(editor.request && tab->lsp_version == tab->document.version);
 	run_until(&loop, editor_tab(&editor) != tab);
 	stop(&editor, &loop);
@@ -461,7 +461,7 @@ TEST(editor_tree)
 }
 
 /*
- * F12 sends the document to the server and goes where the server says, Alt+Left goes back. The selection becomes the
+ * Ctrl+Enter sends the document to the server and goes where the server says, Alt+Left goes back. The selection becomes the
  * primary selection.
  */
 TEST(editor_goes_to_definitions)
@@ -484,7 +484,7 @@ TEST(editor_goes_to_definitions)
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(tab->lsp_version == tab->document.version);
 	assert(document_place(&tab->document, 25, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(editor.request);
 	run_until(&loop, !editor.request && editor_tab(&editor) != tab);
 	tab = loaded(&editor, &loop);
@@ -496,6 +496,10 @@ TEST(editor_goes_to_definitions)
 	assert(!strcmp(path_name(tab->path), "main.c") && tab->document.view.caret == 25);
 	type(&editor, XKB_KEY_Right, SEAT_ALT, "");
 	assert(!strcmp(path_name(editor_tab(&editor)->path), "tar get.h"));
+	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL | SEAT_SHIFT, "");
+	run_until(&loop, !editor.request && editor_tab(&editor) != tab);
+	assert(!strcmp(path_name(editor_tab(&editor)->path), "tar get.h") && editor_tab(&editor)->document.view.caret == 18);
 	stop(&editor, &loop);
 	assert(editor.lsp.state == LSP_EXITED);
 	project_fini(&project);
@@ -588,7 +592,7 @@ TEST(editor_jumps_into_long_files)
 	tab = loaded(&editor, &loop);
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(tab->document.text.line_count == 10'000 && document_place(&tab->document, 250, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	run_until(&loop, !editor.request && editor_tab(&editor) != tab);
 	loaded(&editor, &loop);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
@@ -622,7 +626,7 @@ TEST(editor_drops_definitions_when_stopping)
 	tab = loaded(&editor, &loop);
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(document_place(&tab->document, 25, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	stop(&editor, &loop);
 	assert(editor.lsp.state == LSP_EXITED && editor.tab_count == 1);
 	project_fini(&project);
@@ -651,7 +655,7 @@ TEST(editor_drops_definitions_after_navigation)
 	code = loaded(&editor, &loop);
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(document_place(&code->document, 25, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	assert(editor_tab(&editor) == header);
 	type(&editor, XKB_KEY_Return, 0, "\r");
@@ -787,11 +791,11 @@ TEST(editor_drops_stale_definitions)
 	code = loaded(&editor, &loop);
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(document_place(&code->document, 25, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_z, 0, "z");
 	run_until(&loop, !editor.request);
 	assert(editor_tab(&editor) == code && editor.tab_count == 2 && !editor.jump_count);
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	run_until(&loop, !editor.request);
 	assert(editor_tab(&editor) == notes && editor.tab_count == 2 && !editor.jump_count);
@@ -819,7 +823,7 @@ TEST(editor_goes_back_without_tabs)
 	tab = loaded(&editor, &loop);
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(document_place(&tab->document, 25, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	run_until(&loop, !editor.request && editor_tab(&editor) != tab);
 	loaded(&editor, &loop);
 	type(&editor, XKB_KEY_w, SEAT_CONTROL, "");
@@ -858,7 +862,7 @@ TEST(editor_sends_changes)
 	assert(header->lsp_version && header->lsp_version != header->document.version);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	assert(editor_tab(&editor) == code && document_place(&code->document, 25, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(editor.request && header->lsp_version == header->document.version);
 	run_until(&loop, !editor.request && editor_tab(&editor) == header);
 	stop(&editor, &loop);
@@ -886,7 +890,7 @@ TEST(editor_goes_back_between_characters)
 	tab = loaded(&editor, &loop);
 	run_until(&loop, editor.lsp.state == LSP_READY);
 	assert(document_place(&tab->document, 3, false));
-	type(&editor, XKB_KEY_F12, 0, "");
+	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	run_until(&loop, !editor.request && editor_tab(&editor) != tab);
 	loaded(&editor, &loop);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
