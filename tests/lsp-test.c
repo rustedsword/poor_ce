@@ -189,6 +189,37 @@ TEST(lsp_highlights)
 }
 
 /*
+ * Variables are local, unless the modifiers of the legend tell that they last as long as the program: then they are
+ * global, or constant if they are read only too
+ */
+TEST(lsp_tells_variables_apart)
+{
+	static struct lsp lsp;
+	static struct sample sample;
+	const char *argv[] = { server(), "variables", nullptr };
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "lsp-test");
+	sample_init(&sample, "f(p, l, c, s, g, k);\n");
+	result.text = &sample.text;
+	result.answers = 0;
+	lsp_init(&lsp, &loop, &listener, &memory);
+	lsp_start(&lsp, "/project dir", argv);
+	run_until(&loop, lsp.state == LSP_READY);
+	assert(lsp_open(&lsp, "/project dir/a.c", "c", 1, &sample.text) && lsp_highlight(&lsp, "/project dir/a.c"));
+	run_until(&loop, result.answers == 1);
+	assert(result.found && result.token_count == 7 && token_is(0, 0, 0, 1, SYNTAX_FUNCTION) &&
+	       token_is(1, 0, 2, 1, SYNTAX_PARAMETER) && token_is(2, 0, 5, 1, SYNTAX_LOCAL));
+	assert(token_is(3, 0, 8, 1, SYNTAX_LOCAL) && token_is(4, 0, 11, 1, SYNTAX_GLOBAL) &&
+	       token_is(5, 0, 14, 1, SYNTAX_GLOBAL) && token_is(6, 0, 17, 1, SYNTAX_CONSTANT));
+	lsp_stop(&lsp);
+	run_until(&loop, !lsp_busy(&lsp));
+	run_until(&loop, !log_pending());
+	loop_fini(&loop);
+}
+
+/*
  * A document that doesn't fit beside those that wait for the server isn't sent, until they are. Documents leave room
  * for closing them.
  */

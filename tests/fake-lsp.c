@@ -18,7 +18,9 @@
  * Messages that are too big for it are skipped. With "hang" it doesn't
  * shut down. With "orphan" it exits once it is asked to initialize, a child of it answers later. With "linger" a child
  * of it holds its output for a while after it exits. With "slow" it waits half a second before it reads a message that
- * is bigger than 1 MiB. With "stay" it stays for a while after it is told to exit.
+ * is bigger than 1 MiB. With "stay" it stays for a while after it is told to exit. With "variables" the tokens are those
+ * of "f(p, l, c, s, g, k);\n": a function, a parameter, a local, a read only local, a static local, a global of the file
+ * and a read only one of the program.
  */
 static char message[1 << 16];
 static char root[4096];
@@ -146,6 +148,7 @@ int main(int argc, char **argv)
 {
 	bool hang = argc > 1 && !strcmp(argv[1], "hang"), orphan = argc > 1 && !strcmp(argv[1], "orphan");
 	bool linger = argc > 1 && !strcmp(argv[1], "linger"), stay = argc > 1 && !strcmp(argv[1], "stay"), asked = false;
+	bool variables = argc > 1 && !strcmp(argv[1], "variables");
 
 	slow = argc > 1 && !strcmp(argv[1], "slow");
 	char body[8192];
@@ -158,7 +161,9 @@ int main(int argc, char **argv)
 			snprintf_array(root, "%.*s", (int)strcspn(uri, "\""), uri);
 			snprintf_array(body, "{\"jsonrpc\":\"2.0\",\"id\":%ld,\"result\":{\"capabilities\":{\"positionEncoding\":\"utf-8\","
 				       "\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":true}},\"semanticTokensProvider\":{\"full\":true,\"legend\":{\"tokenTypes\":[\"variable\",\"function\","
-				       "\"macro\",\"type\",\"comment\",\"operator\"],\"tokenModifiers\":[]}}}}}",
+				       "\"macro\",\"type\",\"comment\",\"operator\",\"parameter\"],\"tokenModifiers\":["
+				       "\"declaration\",\"globalScope\",\"readonly\",\"functionScope\",\"static\","
+				       "\"fileScope\"]}}}}}",
 				       id());
 			if (orphan && fork())
 				return 0;
@@ -188,6 +193,10 @@ int main(int argc, char **argv)
 			respond(body);
 		} else if (!strcmp(method(), "textDocument/didSave") && has_file()) {
 			respond("{\"jsonrpc\":\"2.0\",\"id\":\"refresh\",\"method\":\"workspace/semanticTokens/refresh\"}");
+		} else if (!strcmp(method(), "textDocument/semanticTokens/full") && variables) {
+			snprintf_array(body, "{\"jsonrpc\":\"2.0\",\"id\":%ld,\"result\":{\"data\":[0,0,1,1,0,0,2,1,6,9,"
+				       "0,3,1,0,9,0,3,1,0,12,0,3,1,0,24,0,3,1,0,32,0,3,1,0,6]}}", id());
+			respond(body);
 		} else if (!strcmp(method(), "textDocument/semanticTokens/full")) {
 			snprintf_array(body, "{\"jsonrpc\":\"2.0\",\"id\":%ld,\"result\":{\"data\":[0,0,3,3,0,0,4,4,1,0,0,9,1,5,0,"
 				       "2,8,1,2,0,1,0,1,4,0]}}", id());

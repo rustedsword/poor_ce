@@ -120,7 +120,8 @@ static void project_init(struct project *project)
 
 static void project_fini(struct project *project)
 {
-	static const char *const names[] = { "main.c", "tar get.h", "sub/notes.txt", ".hidden", ".hidden.swp", "new.c", "big.c", "sub" };
+	static const char *const names[] = { "main.c", "tar get.h", "sub/notes.txt", ".hidden", ".hidden.swp", "new.c", "big.c",
+					     "variables.c", "sub" };
 
 	foreach_array_const_ref(names, name) {
 		snprintf_array(project->path, "%s/%s", project->root, *name);
@@ -989,6 +990,36 @@ TEST(editor_highlights)
 	type(&editor, XKB_KEY_a, 0, "a");
 	assert(color_at(&atlas, 4, 1) == QUAD_RGB(THEME_TEXT) && tab->tokens_version != tab->document.version);
 	run_until(&loop, tab->tokens_version == tab->document.version);
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+/* Parameters, locals and globals have colors of their own, read only globals that of constants */
+TEST(editor_colors_variables)
+{
+	static struct project project;
+	static struct atlas atlas;
+	const char *server[] = { getenv("FAKE_LSP"), "variables", nullptr };
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "variables.c", "f(p, l, c, s, g, k);\n");
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	assert(color_at(&atlas, 0, 2) == QUAD_RGB(THEME_PARAMETER) && color_at(&atlas, 0, 5) == QUAD_RGB(THEME_LOCAL));
+	assert(color_at(&atlas, 0, 11) == QUAD_RGB(THEME_GLOBAL) && color_at(&atlas, 0, 17) == QUAD_RGB(THEME_CONSTANT));
 	stop(&editor, &loop);
 	font_fini(&font);
 	project_fini(&project);

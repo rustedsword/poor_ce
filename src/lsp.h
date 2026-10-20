@@ -78,6 +78,8 @@ struct lsp {
 	unsigned fill, pipes_made;
 	/* The class of each token type of the server, SYNTAX_CLASSES for types that keep the lexical highlighting */
 	enum syntax_class legend[LSP_LEGEND];
+	/* The bits of the token modifiers of the server that make a variable of a class */
+	uint32_t modifiers[SYNTAX_CLASSES];
 	/* The answer that lsp_token() reads: where the last token was and how far its line was walked */
 	const char *answer;
 	size_t answer_size, token_at, token_line, token_character, walk_line, walk_offset, walk_units;

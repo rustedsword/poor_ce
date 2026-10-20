@@ -23,8 +23,8 @@ poor_loop_group_attach(lsp_output, struct lsp, writer, write_op, on_write);
 poor_loop_group_attach(lsp_input, struct lsp, reader, read_op, on_read);
 
 /*
- * The colors of token types. Others, like variables, parameters, fields and operators, keep the lexical highlighting.
- * clangd marks code that the preprocessor skips as comments.
+ * The colors of token types, variables are local unless their modifiers tell otherwise. Others, like fields and
+ * operators, keep the lexical highlighting. clangd marks code that the preprocessor skips as comments.
  */
 static const struct {
 	const char *name;
@@ -32,8 +32,20 @@ static const struct {
 } KINDS[] = {
 	{ "class", SYNTAX_TYPE }, { "comment", SYNTAX_INACTIVE }, { "concept", SYNTAX_TYPE }, { "enum", SYNTAX_TYPE },
 	{ "enumMember", SYNTAX_CONSTANT }, { "function", SYNTAX_FUNCTION }, { "interface", SYNTAX_TYPE },
-	{ "macro", SYNTAX_MACRO }, { "method", SYNTAX_FUNCTION }, { "struct", SYNTAX_TYPE }, { "type", SYNTAX_TYPE },
-	{ "typeParameter", SYNTAX_TYPE },
+	{ "macro", SYNTAX_MACRO }, { "method", SYNTAX_FUNCTION }, { "parameter", SYNTAX_PARAMETER },
+	{ "struct", SYNTAX_TYPE }, { "type", SYNTAX_TYPE }, { "typeParameter", SYNTAX_TYPE }, { "variable", SYNTAX_LOCAL },
+};
+
+/*
+ * Variables of classes, files and the program, and static ones of functions, last as long as the program: they are
+ * global, or constant if they are read only. clangd says that of pointers to constants too.
+ */
+static const struct {
+	const char *name;
+	enum syntax_class class;
+} MODIFIERS[] = {
+	{ "classScope", SYNTAX_GLOBAL }, { "fileScope", SYNTAX_GLOBAL }, { "globalScope", SYNTAX_GLOBAL },
+	{ "readonly", SYNTAX_CONSTANT }, { "static", SYNTAX_GLOBAL },
 };
 
 static void set_state(struct lsp *lsp, enum lsp_state state)
@@ -211,18 +223,22 @@ static void initialize(struct lsp *lsp)
 			    "\"declaration\":{\"linkSupport\":false},\"semanticTokens\":{\"requests\":{\"full\":true},\"tokenTypes\":[");
 	foreach_array_const_ref(KINDS, kind)
 		json_printf(writer, "%s\"%s\"", kind == KINDS ? "" : ",", kind->name);
-	json_printf(writer, "],\"tokenModifiers\":[],\"formats\":[\"relative\"],\"overlappingTokenSupport\":false,"
+	json_printf(writer, "],\"tokenModifiers\":[");
+	foreach_array_const_ref(MODIFIERS, modifier)
+		json_printf(writer, "%s\"%s\"", modifier == MODIFIERS ? "" : ",", modifier->name);
+	json_printf(writer, "],\"formats\":[\"relative\"],\"overlappingTokenSupport\":false,"
 			    "\"multilineTokenSupport\":false}}}}}");
 	post(lsp);
 }
 
-/* Whether the server sends tokens of whole documents, and the class of each token type of its legend */
+/* Whether the server sends tokens of whole documents, the class of each token type of its legend and its modifiers */
 static void legend(struct lsp *lsp, size_t size, const char (*body)[size], struct json capabilities)
 {
-	struct json provider, full, legend, types, type;
+	struct json provider, full, legend, types, type, modifiers, modifier;
 	char name[32];
 
 	fill_array(lsp->legend, SYNTAX_CLASSES);
+	fill_array(lsp->modifiers, 0);
 	lsp->highlights = json_member(body, capabilities, "semanticTokensProvider", &provider) &&
 			  json_member(body, provider, "full", &full) && !json_is(body, full, "false") &&
 			  json_member(body, provider, "legend", &legend) && json_member(body, legend, "tokenTypes", &types);
@@ -230,6 +246,11 @@ static void legend(struct lsp *lsp, size_t size, const char (*body)[size], struc
 		foreach_array_const_ref(KINDS, kind)
 			if (json_string(body, type, name) != SIZE_MAX && !strcmp(name, kind->name))
 				lsp->legend[i] = kind->class;
+	if (lsp->highlights && json_member(body, legend, "tokenModifiers", &modifiers))
+		for (size_t i = 0, at = 0; i < UINT32_WIDTH && json_next(body, modifiers, &at, &modifier); i++)
+			foreach_array_const_ref(MODIFIERS, entry)
+				if (json_string(body, modifier, name) != SIZE_MAX && !strcmp(name, entry->name))
+					lsp->modifiers[entry->class] |= 1u << i;
 }
 
 static void initialized(struct lsp *lsp, size_t size, const char (*body)[size], struct json root)
@@ -688,6 +709,13 @@ static size_t walk(struct lsp *lsp, const struct text *text, size_t line, size_t
 	return lsp->walk_offset;
 }
 
+static enum syntax_class variable(const struct lsp *lsp, int64_t modifiers)
+{
+	if (!(modifiers & lsp->modifiers[SYNTAX_GLOBAL]))
+		return SYNTAX_LOCAL;
+	return modifiers & lsp->modifiers[SYNTAX_CONSTANT] ? SYNTAX_CONSTANT : SYNTAX_GLOBAL;
+}
+
 /* Each token is five numbers: line and character relative to the previous token, length, type and modifiers */
 bool lsp_token(struct lsp *lsp, const struct text *text, struct lsp_token *token)
 {
@@ -713,7 +741,7 @@ bool lsp_token(struct lsp *lsp, const struct text *text, struct lsp_token *token
 			.line = lsp->token_line,
 			.column = start - text_line_start(text, lsp->token_line),
 			.length = end - start,
-			.class = lsp->legend[values[3]],
+			.class = lsp->legend[values[3]] == SYNTAX_LOCAL ? variable(lsp, values[4]) : lsp->legend[values[3]],
 		};
 		return true;
 	}

@@ -30,6 +30,9 @@ constexpr uint32_t THEME_COMMENT = 0x008000;
 constexpr uint32_t THEME_PREPROCESSOR = 0xaf00db;
 constexpr uint32_t THEME_ATTRIBUTE = 0x7a3e9d;
 constexpr uint32_t THEME_MACRO = 0x8a1bff;
+constexpr uint32_t THEME_GLOBAL = 0xce5c00;
+constexpr uint32_t THEME_LOCAL = 0x001080;
+constexpr uint32_t THEME_PARAMETER = 0x808080;
 constexpr uint32_t THEME_INACTIVE = 0xa3a3a3;
 #elifdef THEME_BLACK
 constexpr uint32_t THEME_BACKGROUND = 0x000000;
@@ -56,6 +59,9 @@ constexpr uint32_t THEME_COMMENT = 0x6a9955;
 constexpr uint32_t THEME_PREPROCESSOR = 0xc586c0;
 constexpr uint32_t THEME_ATTRIBUTE = 0xd7ba7d;
 constexpr uint32_t THEME_MACRO = 0xbeb7ff;
+constexpr uint32_t THEME_GLOBAL = 0xff8c00;
+constexpr uint32_t THEME_LOCAL = 0x9cdcfe;
+constexpr uint32_t THEME_PARAMETER = 0xb2b2b2;
 constexpr uint32_t THEME_INACTIVE = 0x6e6e6e;
 #else // THEME_NANO, the default
 constexpr uint32_t THEME_BACKGROUND = 0x000000;
@@ -82,6 +88,9 @@ constexpr uint32_t THEME_COMMENT = 0x5454ff;
 constexpr uint32_t THEME_PREPROCESSOR = 0x54ffff;
 constexpr uint32_t THEME_ATTRIBUTE = THEME_FUNCTION;
 constexpr uint32_t THEME_MACRO = THEME_CONSTANT;
+constexpr uint32_t THEME_GLOBAL = 0xff8c00;
+constexpr uint32_t THEME_LOCAL = THEME_TEXT;
+constexpr uint32_t THEME_PARAMETER = 0xb2b2b2;
 constexpr uint32_t THEME_INACTIVE = 0x686868;
 #endif
 
