@@ -1,6 +1,3 @@
-[submodule "subprojects/poor_wayland"]
-	path = subprojects/poor_wayland
-	url = https://github.com/rustedsword/poor_wayland.git
 [submodule "subprojects/poor_wayland_swapchain"]
 	path = subprojects/poor_wayland_swapchain
 	url = https://github.com/rustedsword/poor_wayland_swapchain.git

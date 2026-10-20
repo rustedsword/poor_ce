@@ -31,20 +31,20 @@ jobs:
           apt-get install -y --no-install-recommends meson pkgconf libexpat1-dev libxml2-dev libgbm-dev libvulkan-dev vulkan-validationlayers mesa-vulkan-drivers libxkbcommon-dev libfreetype-dev glslang-tools
       - name: Fetch subprojects
         run: |
-          git -c safe.directory='*' submodule update --init subprojects/poor_wayland subprojects/poor_wayland_swapchain subprojects/poor_surface_damage subprojects/wayland-protocols
-          git -c safe.directory='*' -C subprojects/poor_wayland submodule update --init subprojects/poor_loop
-          git -c safe.directory='*' -C subprojects/poor_wayland_swapchain submodule update --init subprojects/vulkan_initializers
-          git -c safe.directory='*' -C subprojects/poor_wayland/subprojects/poor_loop submodule update --init subprojects/poor_base subprojects/liburing/liburing
+          git -c safe.directory='*' submodule update --init subprojects/poor_wayland_swapchain subprojects/poor_surface_damage subprojects/wayland-protocols
+          git -c safe.directory='*' -C subprojects/poor_wayland_swapchain submodule update --init subprojects/poor_wayland subprojects/vulkan_initializers
+          git -c safe.directory='*' -C subprojects/poor_wayland_swapchain/subprojects/poor_wayland submodule update --init subprojects/poor_loop
+          git -c safe.directory='*' -C subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop submodule update --init subprojects/poor_base subprojects/liburing/liburing
       - name: Install liburing, poor_base, poor_loop, poor_wayland, wayland-protocols, vulkan_initializers, poor_wayland_swapchain and poor_surface_damage
         if: matrix.deps == 'system'
         run: |
-          meson setup /tmp/liburing subprojects/poor_wayland/subprojects/poor_loop/subprojects/liburing
+          meson setup /tmp/liburing subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop/subprojects/liburing
           meson install -C /tmp/liburing
-          meson setup /tmp/poor_base subprojects/poor_wayland/subprojects/poor_loop/subprojects/poor_base
+          meson setup /tmp/poor_base subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop/subprojects/poor_base
           meson install -C /tmp/poor_base
-          meson setup /tmp/poor_loop subprojects/poor_wayland/subprojects/poor_loop --wrap-mode=nofallback
+          meson setup /tmp/poor_loop subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop --wrap-mode=nofallback
           meson install -C /tmp/poor_loop
-          meson setup /tmp/poor_wayland subprojects/poor_wayland --wrap-mode=nofallback -Dtests=false
+          meson setup /tmp/poor_wayland subprojects/poor_wayland_swapchain/subprojects/poor_wayland --wrap-mode=nofallback -Dtests=false
           meson install -C /tmp/poor_wayland
           meson setup /tmp/wayland-protocols subprojects/wayland-protocols -Dtests=false
           meson install -C /tmp/wayland-protocols
@@ -85,20 +85,20 @@ jobs:
           sudo apt-get install -y libclang-rt-${{ matrix.version }}-dev meson libexpat1-dev libxml2-dev libgbm-dev libvulkan-dev vulkan-validationlayers mesa-vulkan-drivers libxkbcommon-dev libfreetype-dev glslang-tools
       - name: Fetch subprojects
         run: |
-          git submodule update --init subprojects/poor_wayland subprojects/poor_wayland_swapchain subprojects/poor_surface_damage subprojects/wayland-protocols
-          git -C subprojects/poor_wayland submodule update --init subprojects/poor_loop
-          git -C subprojects/poor_wayland_swapchain submodule update --init subprojects/vulkan_initializers
-          git -C subprojects/poor_wayland/subprojects/poor_loop submodule update --init subprojects/poor_base subprojects/liburing/liburing
+          git submodule update --init subprojects/poor_wayland_swapchain subprojects/poor_surface_damage subprojects/wayland-protocols
+          git -C subprojects/poor_wayland_swapchain submodule update --init subprojects/poor_wayland subprojects/vulkan_initializers
+          git -C subprojects/poor_wayland_swapchain/subprojects/poor_wayland submodule update --init subprojects/poor_loop
+          git -C subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop submodule update --init subprojects/poor_base subprojects/liburing/liburing
       - name: Install liburing, poor_base, poor_loop, poor_wayland, wayland-protocols, vulkan_initializers, poor_wayland_swapchain and poor_surface_damage
         if: matrix.deps == 'system'
         run: |
-          meson setup /tmp/liburing subprojects/poor_wayland/subprojects/poor_loop/subprojects/liburing
+          meson setup /tmp/liburing subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop/subprojects/liburing
           sudo meson install -C /tmp/liburing
-          meson setup /tmp/poor_base subprojects/poor_wayland/subprojects/poor_loop/subprojects/poor_base
+          meson setup /tmp/poor_base subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop/subprojects/poor_base
           sudo meson install -C /tmp/poor_base
-          meson setup /tmp/poor_loop subprojects/poor_wayland/subprojects/poor_loop --wrap-mode=nofallback
+          meson setup /tmp/poor_loop subprojects/poor_wayland_swapchain/subprojects/poor_wayland/subprojects/poor_loop --wrap-mode=nofallback
           sudo meson install -C /tmp/poor_loop
-          meson setup /tmp/poor_wayland subprojects/poor_wayland --wrap-mode=nofallback -Dtests=false
+          meson setup /tmp/poor_wayland subprojects/poor_wayland_swapchain/subprojects/poor_wayland --wrap-mode=nofallback -Dtests=false
           sudo meson install -C /tmp/poor_wayland
           meson setup /tmp/wayland-protocols subprojects/wayland-protocols -Dtests=false
           sudo meson install -C /tmp/wayland-protocols
