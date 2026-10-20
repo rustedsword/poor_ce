@@ -120,7 +120,7 @@ TEST(lsp_locates)
 	run_until(&loop, result.locations == 1);
 	assert(result.id == id && result.found && !strcmp(result.path, "/project dir/tar get.h"));
 	assert(result.line == 2 && result.character == 4);
-	assert(lsp_change(&lsp, "/project dir/a.c", 2, &sample.text));
+	assert(lsp_change(&lsp, "/project dir/a.c", 2, &sample.text, 0));
 	id = lsp_locate(&lsp, "/project dir/a.c", &sample.text, 15, true);
 	run_until(&loop, result.locations == 2);
 	assert(result.id == id && result.line == 5 && result.character == 1);
@@ -130,6 +130,75 @@ TEST(lsp_locates)
 	lsp_stop(&lsp);
 	run_until(&loop, !lsp_busy(&lsp));
 	assert(lsp.state == LSP_EXITED);
+	run_until(&loop, !log_pending());
+	loop_fini(&loop);
+}
+
+static bool file_has_impl(const char *path, size_t size, const char (*bytes)[size])
+{
+	char contents[256];
+	FILE *file = fopen(path, "rb");
+	size_t length;
+
+	if (!file)
+		return false;
+	length = fread(contents, 1, sizeof(contents), file);
+	fclose(file);
+	return length == size && !memcmp(contents, *bytes, size);
+}
+
+#define file_has(path, bytes) file_has_impl(path, ARRAY_SIZE(bytes), &auto_arr(bytes))
+
+static void synced(struct lsp *lsp, struct poor_loop *loop, const struct text *text)
+{
+	unsigned locations = result.locations;
+
+	assert(lsp_locate(lsp, "/project dir/a.c", text, 0, false));
+	run_until(loop, result.locations > locations);
+}
+
+TEST(lsp_sends_changed_lines)
+{
+	static struct lsp lsp;
+	static struct sample sample;
+	char directory[] = "/tmp/lsp-test-XXXXXX", copy[PATH_MAX], changes[PATH_MAX];
+	const char *argv[] = { server(), "incremental", copy, nullptr };
+	struct text *text = &sample.text;
+	struct poor_loop loop;
+	size_t none = 0;
+
+	assert(mkdtemp(directory));
+	snprintf_array(copy, "%s/copy", directory);
+	snprintf_array(changes, "%s/copy.changes", directory);
+	loop_init(&loop);
+	log_init(&loop, "lsp-test");
+	sample_init(&sample, "int x;\nint y = x;\nint z;\n");
+	lsp_init(&lsp, &loop, &listener, &memory);
+	lsp_start(&lsp, "/project dir", argv);
+	run_until(&loop, lsp.state == LSP_READY);
+	assert(lsp.incremental && lsp_open(&lsp, "/project dir/a.c", "c", 1, text));
+	text_mark(text, 1);
+	assert(text_replace(text, 7, 18, arrview_str("long w;\nlong v = 1;\n")) && text_replace(text, 4, 5, arrview_str("X")));
+	assert(lsp_change(&lsp, "/project dir/a.c", 2, text, 1));
+	text_mark(text, 1);
+	synced(&lsp, &loop, text);
+	assert(file_has(copy, arrview_str("int X;\nlong w;\nlong v = 1;\nint z;\n")));
+	assert(file_has(changes, arrview_str("lines\n")));
+	assert(text_replace(text, text->size, text->size, arrview_str("int u;")));
+	assert(lsp_change(&lsp, "/project dir/a.c", 3, text, 1));
+	text_mark(text, 1);
+	synced(&lsp, &loop, text);
+	assert(file_has(copy, arrview_str("int X;\nlong w;\nlong v = 1;\nint z;\nint u;")));
+	assert(file_has(changes, arrview_str("lines\ntext\n")));
+	assert(text_replace(text, text_line_start(text, 1), text_line_start(text, 3), arrview_first(none, "")));
+	assert(lsp_change(&lsp, "/project dir/a.c", 4, text, 1));
+	synced(&lsp, &loop, text);
+	assert(file_has(copy, arrview_str("int X;\nint z;\nint u;")) && file_has(changes, arrview_str("lines\ntext\nlines\n")));
+	unlink(copy);
+	unlink(changes);
+	rmdir(directory);
+	lsp_stop(&lsp);
+	run_until(&loop, !lsp_busy(&lsp));
 	run_until(&loop, !log_pending());
 	loop_fini(&loop);
 }
@@ -245,7 +314,8 @@ TEST(lsp_fills_up)
 	lsp_start(&lsp, "/project dir", argv);
 	run_until(&loop, lsp.state == LSP_READY && !lsp.write_op.pending);
 	assert(lsp_open(&lsp, "/project dir/big.c", "c", 1, &big.text));
-	assert(lsp_change(&lsp, "/project dir/big.c", 2, &big.text) && !lsp_change(&lsp, "/project dir/big.c", 3, &big.text));
+	assert(lsp_change(&lsp, "/project dir/big.c", 2, &big.text, 0) &&
+	       !lsp_change(&lsp, "/project dir/big.c", 3, &big.text, 0));
 	filled = lsp.out_size[lsp.fill];
 	lsp_close(&lsp, "/project dir/big.c");
 	assert(lsp.out_size[lsp.fill] > filled);

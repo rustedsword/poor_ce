@@ -55,10 +55,6 @@ struct lsp_memory {
 	char in[LSP_IN_BYTES];
 };
 
-/*
- * A language server, like clangd, at the other ends of two pipes. Messages from it that don't fit are skipped.
- * Positions are in bytes, or in UTF-16 if the server can't do UTF-8.
- */
 struct lsp {
 	struct poor_loop *loop;
 	const struct lsp_listener *listener;
@@ -84,7 +80,7 @@ struct lsp {
 	const char *answer;
 	size_t answer_size, token_at, token_line, token_character, walk_line, walk_offset, walk_units;
 	struct json token_data;
-	bool utf16, highlights, saves, save_text, writer_open, reader_open, holding, running, stopping;
+	bool utf16, highlights, saves, save_text, incremental, writer_open, reader_open, holding, running, stopping;
 	char root[PATH_MAX];
 	char path[PATH_MAX];
 };
@@ -94,7 +90,7 @@ void lsp_init(struct lsp *lsp, struct poor_loop *loop, const struct lsp_listener
 void lsp_start(struct lsp *lsp, const char *root, const char *const *argv);
 /* Returns whether the document goes to the server, it doesn't while there is no room for it */
 [[nodiscard]] bool lsp_open(struct lsp *lsp, const char *path, const char *language, uint64_t version, const struct text *text);
-[[nodiscard]] bool lsp_change(struct lsp *lsp, const char *path, uint64_t version, const struct text *text);
+[[nodiscard]] bool lsp_change(struct lsp *lsp, const char *path, uint64_t version, const struct text *text, size_t mark);
 void lsp_close(struct lsp *lsp, const char *path);
 /* Tell the server that the document was saved with 'text', so that it reparses the files that include it */
 void lsp_save_impl(struct lsp *lsp, const char *path, size_t size, const char (*text)[size]);

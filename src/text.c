@@ -28,6 +28,18 @@ uint32_t utf8_decode_impl(size_t size, const char (*bytes)[size], size_t *length
 	return c;
 }
 
+void text_mark(struct text *text, size_t mark)
+{
+	assert(mark < TEXT_MARKS);
+	text->changes[mark] = (struct text_changes){ .first = SIZE_MAX, .last = 0, .lines = 0 };
+}
+
+static void mark_all(struct text *text)
+{
+	foreach_array_index(text->changes, mark)
+		text_mark(text, mark);
+}
+
 void text_init_impl(struct text *text, size_t capacity, char (*bytes)[capacity], size_t line_capacity,
 		    uint32_t (*lines)[line_capacity], size_t state_capacity, uint8_t (*states)[state_capacity])
 {
@@ -43,37 +55,37 @@ void text_init_impl(struct text *text, size_t capacity, char (*bytes)[capacity],
 	text->states[0] = 0;
 	text->columns = 0;
 	text->widest = 1;
-	text_mark(text);
+	mark_all(text);
 }
 
-void text_mark(struct text *text)
-{
-	text->changed_first = SIZE_MAX;
-	text->changed_last = 0;
-	text->changed_lines = 0;
-}
-
-/* Lines 'first' to 'last' became 'count' lines from 'first', the changed lines grow to cover them */
 static void changed(struct text *text, size_t first, size_t last, size_t count)
 {
 	ptrdiff_t added = (ptrdiff_t)count - (ptrdiff_t)(last - first + 1);
-	size_t from = text->changed_first, to = text->changed_last, end = first + count - 1;
+	size_t end = first + count - 1;
 
-	if (from <= to) {
-		from = from < first ? from : from > last ? from + added : first;
-		to = to < first ? to : to > last ? to + added : end;
+	foreach_array_ref(text->changes, changes) {
+		size_t from = changes->first, to = changes->last;
+
+		if (from <= to) {
+			from = from < first ? from : from > last ? from + added : first;
+			to = to < first ? to : to > last ? to + added : end;
+		}
+		changes->first = from < first ? from : first;
+		changes->last = from <= to && to > end ? to : end;
+		changes->lines += added;
 	}
-	text->changed_first = from < first ? from : first;
-	text->changed_last = from <= to && to > end ? to : end;
-	text->changed_lines += added;
 }
 
-size_t text_marked_line(const struct text *text, size_t line)
+size_t text_marked_line(const struct text *text, size_t mark, size_t line)
 {
-	if (line < text->changed_first)
+	const struct text_changes *changes;
+
+	assert(mark < TEXT_MARKS);
+	changes = &text->changes[mark];
+	if (line < changes->first)
 		return line;
-	if (line > text->changed_last)
-		return (size_t)((ptrdiff_t)line - text->changed_lines);
+	if (line > changes->last)
+		return (size_t)((ptrdiff_t)line - changes->lines);
 	return SIZE_MAX;
 }
 
@@ -127,7 +139,7 @@ bool text_load(struct text *text, size_t size)
 	memset_array(arrview_first(text->line_count, array_ptr(text->states, text->line_capacity)), 0);
 	text->columns = text->widest = 0;
 	measure(text, 0, text->line_count, false);
-	text_mark(text);
+	mark_all(text);
 	return fits;
 }
 

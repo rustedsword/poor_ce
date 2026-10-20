@@ -121,7 +121,7 @@ static void project_init(struct project *project)
 static void project_fini(struct project *project)
 {
 	static const char *const names[] = { "main.c", "tar get.h", "sub/notes.txt", ".hidden", ".hidden.swp", "new.c", "big.c",
-					     "variables.c", "sub" };
+					     "variables.c", "copy", "copy.changes", "sub" };
 
 	foreach_array_const_ref(names, name) {
 		snprintf_array(project->path, "%s/%s", project->root, *name);
@@ -1120,6 +1120,53 @@ TEST(editor_tells_saves)
 	assert(tab->lsp_version == tab->document.version);
 	run_until(&loop, !tab->tokens_version);
 	run_until(&loop, tab->tokens_version == tab->document.version);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+static bool server_has(struct project *project, const struct editor_tab *tab)
+{
+	char text[256];
+
+	snprintf_array(text, "%.*s", (int)tab->document.text.size, tab->document.text.bytes);
+	return file_is(project, "copy", text);
+}
+
+TEST(editor_sends_changed_lines)
+{
+	static struct project project;
+	char copy[PATH_MAX];
+	const char *server[] = { getenv("FAKE_LSP"), "incremental", copy, nullptr };
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	assert(server[0]);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	snprintf_array(copy, "%s/copy", project.root);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, server);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	assert(document_place(&tab->document, text_line_end(&tab->document.text, 2), false));
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	type(&editor, XKB_KEY_y, 0, "y");
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	assert(text_is(tab, "int main(void)\n{\n\treturn x;\n\ty\n}\n") && server_has(&project, tab));
+	assert(file_is(&project, "copy.changes", "lines\n"));
+	type(&editor, XKB_KEY_z, SEAT_CONTROL, "");
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	assert(text_is(tab, "int main(void)\n{\n\treturn x;\n\t\n}\n") && server_has(&project, tab));
+	assert(file_is(&project, "copy.changes", "lines\nlines\n"));
+	type(&editor, XKB_KEY_End, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_w, 0, "w");
+	run_until(&loop, tab->tokens_version == tab->document.version);
+	assert(text_is(tab, "int main(void)\n{\n\treturn x;\n\t\n}\nw") && server_has(&project, tab));
+	assert(file_is(&project, "copy.changes", "lines\nlines\ntext\n"));
 	stop(&editor, &loop);
 	project_fini(&project);
 }

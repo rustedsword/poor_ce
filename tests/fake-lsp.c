@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 
+#include <fcntl.h>
 #include <poor_array.h>
 #include <poor_stdio.h>
 #include <poor_unistd.h>
@@ -9,22 +10,13 @@
 #include <string.h>
 #include <unistd.h>
 
-/*
- * A language server for the tests, on stdin and stdout. After the first document it asks the client something and
- * sends a notification that is too big for it. Definitions are at line 2, character 4 of "tar get.h" in the root,
- * declarations at line 5, character 1, as a link. The tokens of every document are those of
- * "int main(void)\n{\n\treturn x;\n}\n": a type, a function, an operator, a macro and a line that is left out. A save
- * that comes with the text of its file makes it ask for the tokens of all documents again.
- * Messages that are too big for it are skipped. With "hang" it doesn't
- * shut down. With "orphan" it exits once it is asked to initialize, a child of it answers later. With "linger" a child
- * of it holds its output for a while after it exits. With "slow" it waits half a second before it reads a message that
- * is bigger than 1 MiB. With "stay" it stays for a while after it is told to exit. With "variables" the tokens are those
- * of "f(p, l, c, s, g, k);\n": a function, a parameter, a local, a read only local, a static local, a global of the file
- * and a read only one of the program.
- */
 static char message[1 << 16];
 static char root[4096];
 static char big[(1 << 20) + 4096];
+static char document[1 << 16];
+static char changes[4096];
+static size_t document_size;
+static const char *copy;
 static bool slow;
 
 static size_t receive(void)
@@ -144,6 +136,72 @@ static long id(void)
 	return start ? strtol(start + 5, nullptr, 10) : -1;
 }
 
+static size_t unquote(const char *quoted, size_t capacity, char (*out)[capacity])
+{
+	size_t length = 0;
+
+	for (const char *c = quoted + 1; *c != '"' && length < capacity; c++) {
+		if (*c != '\\') {
+			(*out)[length++] = *c;
+		} else if (*++c == 'u') {
+			(*out)[length++] = strtol((char[]){ c[1], c[2], c[3], c[4], 0 }, nullptr, 16);
+			c += 4;
+		} else {
+			(*out)[length++] = *c == 'n' ? '\n' : *c == 'r' ? '\r' : *c == 't' ? '\t' : *c;
+		}
+	}
+	return length;
+}
+
+static size_t offset(size_t line, size_t character)
+{
+	size_t at = 0;
+
+	while (line && at < document_size)
+		line -= document[at++] == '\n';
+	return at + character;
+}
+
+static void keep_impl(const char *path, int flags, size_t size, const char (*bytes)[size])
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | flags, 0644);
+
+	if (fd < 0 || write_array(fd, bytes) != (ssize_t)size)
+		exit(1);
+	close(fd);
+}
+
+#define keep(path, flags, bytes) keep_impl(path, flags, ARRAY_SIZE(bytes), &auto_arr(bytes))
+
+static void follow(void)
+{
+	static char text[sizeof(message)];
+	const char *range = strstr(message, "\"range\":");
+	size_t first, first_character, last, last_character, start = 0, end = document_size, size;
+	bool lines;
+
+	if (strcmp(method(), "textDocument/didOpen") && strcmp(method(), "textDocument/didChange"))
+		return;
+	lines = range &&
+		sscanf(range, "\"range\":{\"start\":{\"line\":%zu,\"character\":%zu},\"end\":{\"line\":%zu,\"character\":%zu}}",
+		       &first, &first_character, &last, &last_character) == 4;
+	if (lines) {
+		start = offset(first, first_character);
+		end = offset(last, last_character);
+	}
+	size = unquote(strstr(message, "\"text\":\"") + 7, ARRAY_SIZE(text), &text);
+	memmove(&document[start + size], &document[end], document_size - end);
+	memcpy(&document[start], text, size);
+	document_size = document_size - (end - start) + size;
+	keep(copy, O_TRUNC, arrview_first(document_size, document));
+	if (strcmp(method(), "textDocument/didChange"))
+		return;
+	if (lines)
+		keep(changes, O_APPEND, arrview_str("lines\n"));
+	else
+		keep(changes, O_APPEND, arrview_str("text\n"));
+}
+
 int main(int argc, char **argv)
 {
 	bool hang = argc > 1 && !strcmp(argv[1], "hang"), orphan = argc > 1 && !strcmp(argv[1], "orphan");
@@ -151,20 +209,25 @@ int main(int argc, char **argv)
 	bool variables = argc > 1 && !strcmp(argv[1], "variables");
 
 	slow = argc > 1 && !strcmp(argv[1], "slow");
+	copy = argc > 2 && !strcmp(argv[1], "incremental") ? argv[2] : nullptr;
+	if (copy)
+		snprintf_array(changes, "%s.changes", copy);
 	char body[8192];
 
 	for (;;) {
 		receive();
+		if (copy)
+			follow();
 		if (!strcmp(method(), "initialize")) {
 			const char *uri = strstr(message, "\"rootUri\":\"") + 11;
 
 			snprintf_array(root, "%.*s", (int)strcspn(uri, "\""), uri);
 			snprintf_array(body, "{\"jsonrpc\":\"2.0\",\"id\":%ld,\"result\":{\"capabilities\":{\"positionEncoding\":\"utf-8\","
-				       "\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":true}},\"semanticTokensProvider\":{\"full\":true,\"legend\":{\"tokenTypes\":[\"variable\",\"function\","
+				       "\"textDocumentSync\":{\"openClose\":true,\"change\":%d,\"save\":{\"includeText\":true}},\"semanticTokensProvider\":{\"full\":true,\"legend\":{\"tokenTypes\":[\"variable\",\"function\","
 				       "\"macro\",\"type\",\"comment\",\"operator\",\"parameter\"],\"tokenModifiers\":["
 				       "\"declaration\",\"globalScope\",\"readonly\",\"functionScope\",\"static\","
 				       "\"fileScope\"]}}}}}",
-				       id());
+				       id(), copy ? 2 : 1);
 			if (orphan && fork())
 				return 0;
 			if (orphan)

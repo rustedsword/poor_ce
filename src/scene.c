@@ -239,7 +239,7 @@ static void selection(struct scene *scene, const struct document *document, size
 /* The tokens of 'line', from the returned index to 'end'. None if the line was edited since they came. */
 static size_t words_of(const struct editor_tab *tab, size_t line, size_t *end)
 {
-	size_t marked = text_marked_line(&tab->document.text, line), low = 0, high = tab->token_count;
+	size_t marked = text_marked_line(&tab->document.text, EDITOR_MARK_TOKENS, line), low = 0, high = tab->token_count;
 
 	while (low < high) {
 		size_t middle = low + (high - low) / 2;

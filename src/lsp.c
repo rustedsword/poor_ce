@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -255,21 +256,24 @@ static void legend(struct lsp *lsp, size_t size, const char (*body)[size], struc
 
 static void initialized(struct lsp *lsp, size_t size, const char (*body)[size], struct json root)
 {
-	struct json result, capabilities, encoding, sync, save, text;
+	struct json result, capabilities, encoding, sync, save, text, change;
+	bool have_capabilities, have_sync;
 
 	if (!json_member(body, root, "result", &result)) {
 		log_printf("ce: %s didn't start\n", lsp->argv[0]);
 		lsp_stop(lsp);
 		return;
 	}
-	lsp->utf16 = !json_member(body, result, "capabilities", &capabilities) ||
-		     !json_member(body, capabilities, "positionEncoding", &encoding) || !json_is(body, encoding, "\"utf-8\"");
-	if (json_member(body, result, "capabilities", &capabilities))
+	have_capabilities = json_member(body, result, "capabilities", &capabilities);
+	have_sync = have_capabilities && json_member(body, capabilities, "textDocumentSync", &sync);
+	lsp->utf16 = !have_capabilities || !json_member(body, capabilities, "positionEncoding", &encoding) ||
+		     !json_is(body, encoding, "\"utf-8\"");
+	if (have_capabilities)
 		legend(lsp, size, body, capabilities);
-	lsp->saves = json_member(body, result, "capabilities", &capabilities) &&
-		     json_member(body, capabilities, "textDocumentSync", &sync) && json_member(body, sync, "save", &save) &&
-		     !json_is(body, save, "false");
+	lsp->saves = have_sync && json_member(body, sync, "save", &save) && !json_is(body, save, "false");
 	lsp->save_text = lsp->saves && json_member(body, save, "includeText", &text) && json_is(body, text, "true");
+	lsp->incremental = have_sync && (json_is(body, sync, "2") ||
+					 (json_member(body, sync, "change", &change) && json_is(body, change, "2")));
 	json_printf(notification(lsp, "initialized", false), ",\"params\":{}}");
 	post(lsp);
 	set_state(lsp, LSP_READY);
@@ -544,7 +548,7 @@ void lsp_init(struct lsp *lsp, struct poor_loop *loop, const struct lsp_listener
 	lsp->initialize_id = lsp->shutdown_id = lsp->highlight_id = 0;
 	lsp->out_size[0] = lsp->out_size[1] = lsp->written = lsp->in_size = lsp->skip = 0;
 	lsp->fill = lsp->pipes_made = 0;
-	lsp->utf16 = lsp->highlights = lsp->saves = lsp->save_text = false;
+	lsp->utf16 = lsp->highlights = lsp->saves = lsp->save_text = lsp->incremental = false;
 	lsp->writer_open = lsp->reader_open = lsp->holding = lsp->running = lsp->stopping = false;
 }
 
@@ -577,17 +581,30 @@ bool lsp_open(struct lsp *lsp, const char *path, const char *language, uint64_t 
 	return post(lsp);
 }
 
-bool lsp_change(struct lsp *lsp, const char *path, uint64_t version, const struct text *text)
+bool lsp_change(struct lsp *lsp, const char *path, uint64_t version, const struct text *text, size_t mark)
 {
+	const struct text_changes *changes;
 	struct json_writer *writer;
+	size_t start, end;
+	bool partial;
 
+	assert(mark < TEXT_MARKS);
+	changes = &text->changes[mark];
 	if (lsp->state != LSP_READY)
 		return false;
+	partial = lsp->incremental && changes->first <= changes->last && changes->last + 1 < text->line_count;
+	start = partial ? text_line_start(text, changes->first) : 0;
+	end = partial ? text_line_start(text, changes->last + 1) : text->size;
 	writer = notification(lsp, "textDocument/didChange", true);
 	json_printf(writer, ",\"params\":{\"textDocument\":");
 	document(writer, path);
-	json_printf(writer, ",\"version\":%" PRIu64 "},\"contentChanges\":[{\"text\":", version);
-	json_quote(writer, arrview_first(text->size, array_ptr(text->bytes, text->capacity)));
+	json_printf(writer, ",\"version\":%" PRIu64 "},\"contentChanges\":[{", version);
+	if (partial)
+		json_printf(writer, "\"range\":{\"start\":{\"line\":%zu,\"character\":0},"
+				    "\"end\":{\"line\":%zu,\"character\":0}},",
+			    changes->first, (size_t)((ptrdiff_t)changes->last - changes->lines) + 1);
+	json_printf(writer, "\"text\":");
+	json_quote(writer, arrview(start, end - start, array_ptr(text->bytes, text->capacity)));
 	json_printf(writer, "}]}}");
 	return post(lsp);
 }

@@ -113,11 +113,13 @@ static bool lsp_sync(struct editor *editor, struct editor_tab *tab)
 	if (tab->lsp_version == tab->document.version)
 		return true;
 	if (tab->lsp_version)
-		sent = lsp_change(&editor->lsp, tab->path, tab->document.version, &tab->document.text);
+		sent = lsp_change(&editor->lsp, tab->path, tab->document.version, &tab->document.text, EDITOR_MARK_SERVER);
 	else
 		sent = lsp_open(&editor->lsp, tab->path, lang, tab->document.version, &tab->document.text);
-	if (sent)
+	if (sent) {
 		tab->lsp_version = tab->document.version;
+		text_mark(&tab->document.text, EDITOR_MARK_SERVER);
+	}
 	return sent;
 }
 
@@ -804,7 +806,7 @@ static void lsp_tokens(struct lsp *lsp, bool found)
 				.class = token.class,
 			};
 		tab->tokens_version = tab->document.version;
-		text_mark(&tab->document.text);
+		text_mark(&tab->document.text, EDITOR_MARK_TOKENS);
 		changed(editor);
 	}
 	highlight(editor);

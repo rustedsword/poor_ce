@@ -23,6 +23,14 @@ constexpr uint64_t EDITOR_HIGHLIGHT_NS = 250'000'000;
 
 poor_loop_fd_declare(editor_file);
 
+enum : size_t {
+	EDITOR_MARK_TOKENS,
+	EDITOR_MARK_SERVER,
+	EDITOR_MARKS,
+};
+
+static_assert(EDITOR_MARKS == TEXT_MARKS);
+
 struct editor;
 
 /* A token of the language server: its line when the tokens came, its byte column and length, and its class */
