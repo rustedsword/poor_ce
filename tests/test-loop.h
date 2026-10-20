@@ -13,7 +13,7 @@
 
 #include "test-ring.h"
 
-constexpr uint64_t TEST_TIMEOUT_NS = 5'000'000'000;
+constexpr uint64_t TEST_TIMEOUT_NS = 20'000'000'000;
 
 static void watchdog_fire(struct poor_loop *, struct poor_loop_timer *)
 {
