@@ -432,11 +432,11 @@ TEST(syntax_tokens)
 	static const enum syntax_class include[] = { SYNTAX_PREPROCESSOR, SYNTAX_STRING };
 	static const char *const include_words[] = { "#include", "<stdio.h>" };
 	static const enum syntax_class code[] = {
-		SYNTAX_KEYWORD, SYNTAX_TYPE, SYNTAX_FUNCTION, SYNTAX_TYPE, SYNTAX_CONTROL, SYNTAX_CONSTANT, SYNTAX_NUMBER,
-		SYNTAX_STRING, SYNTAX_STRING, SYNTAX_COMMENT,
+		SYNTAX_KEYWORD, SYNTAX_TYPE, SYNTAX_FUNCTION, SYNTAX_TYPE, SYNTAX_CONTROL, SYNTAX_JUMP, SYNTAX_CONSTANT,
+		SYNTAX_NUMBER, SYNTAX_STRING, SYNTAX_STRING, SYNTAX_COMMENT,
 	};
 	static const char *const code_words[] = {
-		"static", "int", "foo", "void", "return", "BAR", "0x1'0p+3", "'c'", "u8\"s\\\"\"", "// done",
+		"static", "int", "foo", "void", "if", "return", "BAR", "0x1'0p+3", "'c'", "u8\"s\\\"\"", "// done",
 	};
 	static const enum syntax_class tag[] = { SYNTAX_KEYWORD, SYNTAX_TYPE };
 	static const char *const tag_words[] = { "struct", "seat" };
@@ -451,7 +451,7 @@ TEST(syntax_tokens)
 	uint8_t state;
 
 	assert(!tokens(0, "#include <stdio.h>", 2, &include, &include_words));
-	assert(!tokens(0, "static int foo(void) { return BAR + 0x1'0p+3 + 'c' + u8\"s\\\"\"; } // done", 10, &code, &code_words));
+	assert(!tokens(0, "static int foo(void) { if (x) return BAR + 0x1'0p+3 + 'c' + u8\"s\\\"\"; } // done", 11, &code, &code_words));
 	assert(!tokens(0, "struct seat *seat;", 2, &tag, &tag_words));
 	state = tokens(0, "[[nodiscard]] size_t x = nullptr; /* a", 4, &attribute, &attribute_words);
 	assert(state);
