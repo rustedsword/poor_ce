@@ -5,8 +5,8 @@ option('tests',
 option('theme',
   description: 'Colors of the editor',
   type: 'combo',
-  choices: ['black', 'white'],
-  value: 'black')
+  choices: ['black', 'white', 'nano'],
+  value: 'nano')
 option('font_size',
   description: 'Size of the font in logical pixels',
   type: 'integer',

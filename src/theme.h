@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /* 0xRRGGBB colors of the theme that the 'theme' option picks */
-#if THEME_WHITE
+#ifdef THEME_WHITE
 constexpr uint32_t THEME_BACKGROUND = 0xffffff;
 constexpr uint32_t THEME_PANEL = 0xf3f3f3;
 constexpr uint32_t THEME_BORDER = 0xe0e0e0;
@@ -31,7 +31,7 @@ constexpr uint32_t THEME_PREPROCESSOR = 0xaf00db;
 constexpr uint32_t THEME_ATTRIBUTE = 0x7a3e9d;
 constexpr uint32_t THEME_MACRO = 0x8a1bff;
 constexpr uint32_t THEME_INACTIVE = 0xa3a3a3;
-#else
+#elifdef THEME_BLACK
 constexpr uint32_t THEME_BACKGROUND = 0x000000;
 constexpr uint32_t THEME_PANEL = 0x000000;
 constexpr uint32_t THEME_BORDER = 0x2b2b2b;
@@ -57,6 +57,32 @@ constexpr uint32_t THEME_PREPROCESSOR = 0xc586c0;
 constexpr uint32_t THEME_ATTRIBUTE = 0xd7ba7d;
 constexpr uint32_t THEME_MACRO = 0xbeb7ff;
 constexpr uint32_t THEME_INACTIVE = 0x6e6e6e;
+#else // THEME_NANO, the default
+constexpr uint32_t THEME_BACKGROUND = 0x000000;
+constexpr uint32_t THEME_PANEL = 0x000000;
+constexpr uint32_t THEME_BORDER = 0x2b2b2b;
+constexpr uint32_t THEME_TEXT = 0xffffff;
+constexpr uint32_t THEME_DIM = 0x8b8b8b;
+constexpr uint32_t THEME_LINE_NUMBER = 0x6e7681;
+constexpr uint32_t THEME_CURRENT_LINE = 0x161616;
+constexpr uint32_t THEME_SELECTION = 0x264f78;
+constexpr uint32_t THEME_SELECTION_INACTIVE = 0x3a3d41;
+constexpr uint32_t THEME_CARET = 0xffffff;
+constexpr uint32_t THEME_ACCENT = 0x0078d4;
+constexpr uint32_t THEME_TREE_ACTIVE = 0x04395e;
+constexpr uint32_t THEME_KEYWORD = 0x18b218;
+constexpr uint32_t THEME_CONTROL = 0xffff54;
+constexpr uint32_t THEME_JUMP = 0xb218b2;
+constexpr uint32_t THEME_TYPE = THEME_KEYWORD;
+constexpr uint32_t THEME_FUNCTION = 0x18b2b2;
+constexpr uint32_t THEME_CONSTANT = 0xff5454;
+constexpr uint32_t THEME_NUMBER = THEME_TEXT;
+constexpr uint32_t THEME_STRING = THEME_CONTROL;
+constexpr uint32_t THEME_COMMENT = 0x5454ff;
+constexpr uint32_t THEME_PREPROCESSOR = 0x54ffff;
+constexpr uint32_t THEME_ATTRIBUTE = THEME_FUNCTION;
+constexpr uint32_t THEME_MACRO = THEME_CONSTANT;
+constexpr uint32_t THEME_INACTIVE = 0x686868;
 #endif
 
 #endif

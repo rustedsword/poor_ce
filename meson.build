@@ -31,7 +31,7 @@ add_project_arguments(
 	]),
 	language: 'c'
 )
-add_project_arguments('-DTHEME_WHITE=@0@'.format((get_option('theme') == 'white').to_int()), language: 'c')
+add_project_arguments('-DTHEME_' + get_option('theme').to_upper(), language: 'c')
 add_project_arguments('-DFONT_SIZE=@0@'.format(get_option('font_size')), language: 'c')
 
 foreach h: [ 'sys/prctl.h' ]

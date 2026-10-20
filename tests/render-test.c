@@ -25,16 +25,21 @@
 
 static const uint64_t LINEAR[] = { DRM_FORMAT_MOD_LINEAR };
 
-/* B8G8R8A8 pixels close to 'color', which is 0xRRGGBB */
-static bool near(uint32_t pixel, uint32_t color)
+/* B8G8R8A8 pixels at most 'tolerance' off 'color', which is 0xRRGGBB, in each channel */
+static bool within(uint32_t pixel, uint32_t color, int tolerance)
 {
 	for (unsigned shift = 0; shift < 24; shift += 8) {
 		int channel = pixel >> shift & 0xff, expected = color >> shift & 0xff;
 
-		if (channel - expected > 1 || expected - channel > 1)
+		if (channel - expected > tolerance || expected - channel > tolerance)
 			return false;
 	}
 	return true;
+}
+
+static bool near(uint32_t pixel, uint32_t color)
+{
+	return within(pixel, color, 1);
 }
 
 /* Whether some pixel of the cell at 'x', 'y' of 'width' x 'height' pixels passes 'test' */
@@ -381,9 +386,10 @@ static void write_file(const char *directory, const char *name, const char *cont
 	close(fd);
 }
 
-static bool teal(uint32_t pixel)
+/* No pixel of a glyph covers all of it, so none has quite the color */
+static bool type_color(uint32_t pixel)
 {
-	return (pixel & 0xff) > (pixel >> 16 & 0xff) + 0x30;
+	return within(pixel, THEME_TYPE, 0x10);
 }
 
 struct sample {
@@ -426,7 +432,7 @@ static void sample_close(struct sample *sample, struct editor *editor, struct po
 
 /*
  * The editor with the tree of a directory and a C file in a tab: the panels and the caret have the colors of the theme,
- * the caret is at the start of the line it stands out on, and types are teal.
+ * the caret is at the start of the line it stands out on, and types have their color.
  */
 TEST(render_editor)
 {
@@ -450,7 +456,7 @@ TEST(render_editor)
 	assert(near((*pixels)[300 - 2 * target.font.cell_height][2], THEME_PANEL) && near((*pixels)[318][638], THEME_PANEL));
 	assert(near((*pixels)[y + target.font.cell_height / 2][x], THEME_CARET));
 	assert(near((*pixels)[y + target.font.cell_height / 2][630], THEME_CURRENT_LINE));
-	assert(cell_has(320, 640, pixels, x + target.font.cell_width, y, &target.font, teal));
+	assert(cell_has(320, 640, pixels, x + target.font.cell_width, y, &target.font, type_color));
 	sample_close(&sample, &editor, &loop);
 	target_fini(&target, &loop);
 }
