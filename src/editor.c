@@ -527,7 +527,7 @@ static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io
 
 	if (tab->closing) {
 		if (cqe->res >= 0)
-			poor_loop_close_fd_or_submit(editor->loop, cqe->res, 0);
+			poor_loop_close_fd_or_submit(editor->loop, cqe->res, IOSQE_ASYNC);
 		tab_release(tab);
 		return;
 	}

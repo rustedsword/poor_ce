@@ -121,7 +121,7 @@ static void app_teardown(struct app *app)
 	if (app->have_renderer)
 		renderer_fini(&app->renderer);
 	if (app->drm_fd >= 0)
-		poor_loop_close_fd_or_submit(&app->loop, app->drm_fd, 0);
+		poor_loop_close_fd_or_submit(&app->loop, app->drm_fd, IOSQE_ASYNC);
 	poor_wl_display_disconnect(&app->display);
 	if (app->signal_op.pending)
 		io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(&app->loop)), &app->signal_op, 0);
@@ -132,7 +132,7 @@ static void on_idle(struct poor_loop *, struct poor_loop_op *op, const struct io
 {
 	struct app *app = container_of(op, struct app, idle_op);
 
-	poor_loop_close_fd_or_submit(&app->loop, app->idle_fd, 0);
+	poor_loop_close_fd_or_submit(&app->loop, app->idle_fd, IOSQE_ASYNC);
 	vkGetFenceStatus(app->renderer.device, app->renderer.drained);
 	app_teardown(app);
 }
@@ -313,7 +313,7 @@ static void on_node(struct poor_loop *, struct poor_loop_op *op, const struct io
 
 	if (app->closing) {
 		if (cqe->res >= 0)
-			poor_loop_close_fd_or_submit(&app->loop, cqe->res, 0);
+			poor_loop_close_fd_or_submit(&app->loop, cqe->res, IOSQE_ASYNC);
 		return;
 	}
 	if (cqe->res < 0) {

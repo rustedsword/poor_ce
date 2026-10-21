@@ -61,7 +61,7 @@ static void transfer_start(struct seat_source *source, int32_t fd)
 		return;
 	}
 	log_printf("ce: too many pastes at once\n");
-	poor_loop_close_fd_or_submit(seat->loop, fd, 0);
+	poor_loop_close_fd_or_submit(seat->loop, fd, IOSQE_ASYNC);
 }
 
 static void source_destroy(struct seat *seat, struct seat_source *source)
@@ -322,7 +322,7 @@ static void paste_on_pipe(struct poor_loop *, struct poor_loop_op *op, const str
 	if (cqe->res < 0 || !offer || seat->closing) {
 		if (cqe->res >= 0)
 			foreach_array_const_ref(paste->fds, fd)
-				poor_loop_close_fd_or_submit(seat->loop, *fd, 0);
+				poor_loop_close_fd_or_submit(seat->loop, *fd, IOSQE_ASYNC);
 		paste->busy = false;
 		paste->size = 0;
 		if (!seat->closing)
@@ -584,7 +584,7 @@ static void keyboard_keymap(void *data, struct poor_wl_keyboard *, uint32_t form
 
 	if (format == POOR_WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1)
 		memory = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-	poor_loop_close_fd_or_submit(seat->loop, fd, 0);
+	poor_loop_close_fd_or_submit(seat->loop, fd, IOSQE_ASYNC);
 	if (memory != MAP_FAILED) {
 		auto map = array_ptr((char *)memory, size);
 

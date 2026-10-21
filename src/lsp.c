@@ -489,12 +489,12 @@ static void spawn(struct lsp *lsp)
 	ret = posix_spawnp(&lsp->pid, lsp->argv[0], &actions, &attributes, (char *const *)lsp->argv, environ);
 	posix_spawnattr_destroy(&attributes);
 	posix_spawn_file_actions_destroy(&actions);
-	poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[0][0], 0);
-	poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[1][1], 0);
+	poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[0][0], IOSQE_ASYNC);
+	poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[1][1], IOSQE_ASYNC);
 	if (ret) {
 		log_printf("ce: %s: %s\n", lsp->argv[0], strerror(ret));
-		poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[0][1], 0);
-		poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[1][0], 0);
+		poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[0][1], IOSQE_ASYNC);
+		poor_loop_close_fd_or_submit(lsp->loop, lsp->pipes[1][0], IOSQE_ASYNC);
 		set_state(lsp, LSP_OFF);
 		return;
 	}
@@ -529,7 +529,7 @@ static void on_pipe(struct poor_loop *, struct poor_loop_op *op, const struct io
 	}
 	foreach_array_const_ref(arrview_first(lsp->pipes_made, lsp->pipes), pipe)
 		foreach_array_const_ref(pipe, fd)
-			poor_loop_close_fd_or_submit(lsp->loop, *fd, 0);
+			poor_loop_close_fd_or_submit(lsp->loop, *fd, IOSQE_ASYNC);
 	set_state(lsp, LSP_OFF);
 }
 

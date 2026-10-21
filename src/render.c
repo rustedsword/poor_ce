@@ -130,7 +130,7 @@ static int renderer_allocate(void *data, struct poor_wl_swapchain_buffer *buffer
 	if (!target_init(renderer, target, ((struct poor_wl_vulkan_image *)buffer->data)->image)) {
 		target_fini(renderer, target);
 		foreach_array_const_ref(arrview_first(buffer->plane_count, buffer->planes), plane)
-			poor_loop_close_fd_or_submit(renderer->vulkan.loop, plane->fd, 0);
+			poor_loop_close_fd_or_submit(renderer->vulkan.loop, plane->fd, IOSQE_ASYNC);
 		poor_wl_vulkan_allocator.free(&renderer->vulkan, buffer);
 		return -ENOMEM;
 	}

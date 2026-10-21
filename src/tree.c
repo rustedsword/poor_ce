@@ -283,7 +283,7 @@ static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io
 
 	if (tree->stopped) {
 		if (cqe->res >= 0)
-			poor_loop_close_fd_or_submit(tree->loop, cqe->res, 0);
+			poor_loop_close_fd_or_submit(tree->loop, cqe->res, IOSQE_ASYNC);
 		return;
 	}
 	if (cqe->res < 0) {
