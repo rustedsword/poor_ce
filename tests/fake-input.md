@@ -57,3 +57,11 @@ Key names: letters, digits, `f1`-`f12`, `ctrl`, `shift`, `alt`, `altgr`, `super`
 needs, unless `-o X,Y` moves their origin and `-s SCALE` divides them:
 
     $ build/tests/fake-input -d 1280x800 move 640 400 wheel -3
+
+## When done
+
+While input is faked, the desktop isn't the user's. Quit the editor once you are done with it and send a critical
+notification, which stays until it is closed, so that the user knows the desktop is theirs again:
+
+    $ kill -TERM $(pidof ce)
+    $ notify-send -u critical ce 'Done with the desktop, it is yours again'
