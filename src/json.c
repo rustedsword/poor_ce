@@ -296,33 +296,52 @@ static void put(struct json_writer *writer, size_t size, const char (*bytes)[siz
 	writer->size += size;
 }
 
+static bool plain(unsigned char c)
+{
+	return c >= 0x20 && c < 0x80 && c != '"' && c != '\\';
+}
+
+/* The subtractions borrow from bytes below 0x20, quotes and backslashes, which may flag bytes after them too */
+static bool plain_word(const char (*bytes)[8])
+{
+	constexpr uint64_t ones = 0x0101010101010101;
+	uint64_t word, borrows;
+
+	memcpy(&word, *bytes, sizeof(word));
+	borrows = (word - 0x20 * ones) | ((word ^ '"' * ones) - ones) | ((word ^ '\\' * ones) - ones);
+	return !((borrows | word) & 0x80 * ones);
+}
+
 void json_quote_impl(struct json_writer *writer, size_t size, const char (*bytes)[size])
 {
+	static const char digits[] = "0123456789abcdef";
 	size_t at = 0, run = 0, length;
-	char escape[8];
 
 	put(writer, 1, &"\"");
 	while (at < size) {
+		while (size - at >= 8 && plain_word(arrview(at, 8, bytes)))
+			at += 8;
+		while (at < size && plain((*bytes)[at]))
+			at++;
+		if (at == size)
+			break;
 		unsigned char c = (*bytes)[at];
 
 		if (c >= 0x80 && (utf8_decode(arrview_cfront(at, bytes), &length) != TEXT_REPLACEMENT || length > 1)) {
 			at += length;
 			continue;
 		}
-		if (c >= 0x20 && c != '"' && c != '\\' && c < 0x80) {
-			at++;
-			continue;
+		char escape[] = { '\\', 'u', '0', '0', digits[c >> 4], digits[c & 15] };
+		size_t n = sizeof(escape);
+
+		if (c >= 0x80) {
+			copy_array(arrview(2, 4, escape), arrview_str("fffd"));
+		} else if (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t') {
+			escape[1] = c == '\n' ? 'n' : c == '\r' ? 'r' : c == '\t' ? 't' : c;
+			n = 2;
 		}
-		if (c >= 0x80)
-			snprintf_array(escape, "\\ufffd");
-		else if (c == '"' || c == '\\')
-			snprintf_array(escape, "\\%c", c);
-		else if (c == '\n' || c == '\r' || c == '\t')
-			snprintf_array(escape, "\\%c", c == '\n' ? 'n' : c == '\r' ? 'r' : 't');
-		else
-			snprintf_array(escape, "\\u%04x", c);
 		put(writer, at - run, arrview(run, at - run, bytes));
-		put(writer, strlen(escape), &escape);
+		put(writer, n, arrview_first(n, escape));
 		run = ++at;
 	}
 	put(writer, at - run, arrview(run, at - run, bytes));

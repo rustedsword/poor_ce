@@ -317,7 +317,7 @@ static struct editor_tab *tab_new(struct editor *editor, const char *path)
 	tab->digits = GUTTER_DIGITS;
 	tab->lsp_version = tab->tokens_version = 0;
 	tab->loading = tab->saving = tab->queued = tab->closing = tab->file_open = tab->jump = tab->close_saved = false;
-	tab->identified = false;
+	tab->identified = tab->indexing = false;
 	snprintf_array(tab->path, "%s", path);
 	memmove(arrview(index + 1, editor->tab_count - index, editor->order), arrview(index, editor->tab_count - index, editor->order),
 		ARRAY_SIZE_BYTES(arrview(index, editor->tab_count - index, editor->order)));
@@ -347,6 +347,7 @@ static void tab_close(struct editor_tab *tab)
 		editor->request = 0;
 	if (editor->highlight_tab == tab)
 		editor->highlight_tab = nullptr;
+	tab->indexing = false;
 	foreach_array_ref(((struct poor_loop_op *[]){ &tab->open_op, &tab->read_op }), op)
 		if ((*op)->pending)
 			io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(editor->loop)), *op, 0);
@@ -366,13 +367,13 @@ static void reveal(struct editor_tab *tab, size_t offset)
 	view_reveal(view, at);
 }
 
-static void loaded(struct editor_tab *tab, bool cut)
+static void loaded(struct editor_tab *tab)
 {
 	struct editor *editor = tab->editor;
 	struct document *document = &tab->document;
 
 	tab->loading = false;
-	if (!document_load(document, tab->done) || cut) {
+	if (document->read_only || tab->done == document->text.capacity) {
 		document->read_only = true;
 		status(editor, "%s is too big to edit", path_name(tab->path));
 	}
@@ -383,9 +384,42 @@ static void loaded(struct editor_tab *tab, bool cut)
 		reveal(tab, tab->jump_offset < document->text.size ? tab->jump_offset : document->text.size);
 	tab->jump = false;
 	tab->jump_offset = SIZE_MAX;
-	lsp_sync(editor, tab);
-	highlight(editor);
 	changed(editor);
+	poor_loop_timer_arm(editor->loop, &editor->highlight, 0);
+}
+
+static struct editor_tab *indexing_tab(struct editor *editor)
+{
+	struct editor_tab *shown = editor_tab(editor);
+
+	if (shown && shown->indexing)
+		return shown;
+	foreach_array_ref(editor->tabs, tab)
+		if (tab->used && tab->indexing)
+			return tab;
+	return nullptr;
+}
+
+static void on_index(struct poor_loop *loop, struct poor_loop_timer *timer)
+{
+	struct editor *editor = container_of(timer, struct editor, indexing);
+	struct editor_tab *tab = indexing_tab(editor);
+
+	if (!tab)
+		return;
+	if (document_index(&tab->document, EDITOR_INDEX_BYTES)) {
+		tab->indexing = false;
+		loaded(tab);
+	}
+	if (indexing_tab(editor))
+		poor_loop_timer_arm(loop, timer, 0);
+}
+
+static void index_file(struct editor_tab *tab)
+{
+	document_begin(&tab->document, tab->done);
+	tab->indexing = true;
+	poor_loop_timer_arm(tab->editor->loop, &tab->editor->indexing, 0);
 }
 
 static void read_next(struct editor_tab *tab)
@@ -412,7 +446,7 @@ POOR_LOOP_GROUP_OP(on_read, loop, file, op, cqe)
 		read_next(tab);
 		return;
 	}
-	loaded(tab, tab->done == tab->document.text.capacity);
+	index_file(tab);
 }
 
 static void stat_file(struct editor_tab *tab)
@@ -498,7 +532,7 @@ static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io
 		return;
 	}
 	if (cqe->res == -ENOENT) {
-		loaded(tab, false);
+		index_file(tab);
 		return;
 	}
 	if (cqe->res < 0) {
@@ -1493,6 +1527,7 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	foreach_array_ref(editor->tabs, tab)
 		tab->used = false;
 	poor_loop_timer_init(&editor->highlight, on_highlight);
+	poor_loop_timer_init(&editor->indexing, on_index);
 	editor->highlight_tab = nullptr;
 	lsp_init(&editor->lsp, loop, &lsp_listener, &memory->lsp);
 	editor_layout(editor);
@@ -1516,12 +1551,14 @@ void editor_stop(struct editor *editor)
 	if (editor->started)
 		tree_stop(&editor->tree);
 	poor_loop_timer_disarm(&editor->highlight);
+	poor_loop_timer_disarm(&editor->indexing);
 	editor->request = 0;
 	lsp_stop(&editor->lsp);
 	foreach_array_ref(editor->tabs, tab) {
 		if (!tab->used || !tab->loading)
 			continue;
 		tab->closing = true;
+		tab->indexing = false;
 		foreach_array_ref(((struct poor_loop_op *[]){ &tab->open_op, &tab->read_op }), op)
 			if ((*op)->pending)
 				io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(editor->loop)), *op, 0);

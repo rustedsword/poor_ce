@@ -20,6 +20,7 @@ constexpr size_t EDITOR_TREE_MIN = 8;
 constexpr uint32_t EDITOR_CLICK_MS = 400;
 constexpr size_t EDITOR_TOKENS = 1 << 17;
 constexpr uint64_t EDITOR_HIGHLIGHT_NS = 250'000'000;
+constexpr size_t EDITOR_INDEX_BYTES = 256 << 10;
 
 poor_loop_fd_declare(editor_file);
 
@@ -58,7 +59,7 @@ struct editor_tab {
 	uint64_t lsp_version, tokens_version, inode;
 	uint32_t device;
 	int error;
-	bool used, loading, saving, queued, closing, file_open, jump, close_saved, identified;
+	bool used, loading, indexing, saving, queued, closing, file_open, jump, close_saved, identified;
 	char path[PATH_MAX];
 };
 
@@ -129,7 +130,7 @@ struct editor {
 	struct lsp lsp;
 	struct editor_tab *order[EDITOR_TABS];
 	struct editor_tab *saving;
-	struct poor_loop_timer highlight;
+	struct poor_loop_timer highlight, indexing;
 	size_t tab_count, active, tab_first;
 	size_t jump_count, jump_at;
 	uint64_t request, request_version, paste_version, highlight_version;

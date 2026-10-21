@@ -52,8 +52,8 @@ void document_init_impl(struct document *document, size_t capacity, char (*bytes
 	document_init_impl(document, ARRAY_SIZE(bytes), &auto_arr(bytes), ARRAY_SIZE(lines), &auto_arr(lines), \
 			   ARRAY_SIZE(states), &auto_arr(states), ARRAY_SIZE(edits), &auto_arr(edits), ARRAY_SIZE(history), \
 			   &auto_arr(history))
-/* The text got 'size' bytes. If not all of its lines fit, the rest is cut off and the document is read only. */
-[[nodiscard]] bool document_load(struct document *document, size_t size);
+void document_begin(struct document *document, size_t size);
+[[nodiscard]] bool document_index(struct document *document, size_t budget);
 
 bool document_move(struct document *document, enum document_motion motion, bool extend);
 /* The caret goes to the character boundary 'offset', and so does the anchor unless the selection extends */

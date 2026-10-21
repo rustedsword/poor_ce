@@ -80,9 +80,12 @@ struct sample {
 
 static void sample_init(struct sample *sample, const char *contents)
 {
+	bool fits;
+
 	text_init(&sample->text, sample->bytes, sample->lines, sample->states);
 	copy_array(sample->bytes, array_ptr(contents, strlen(contents)));
-	assert(text_load(&sample->text, strlen(contents)));
+	text_begin(&sample->text, strlen(contents));
+	assert(text_index(&sample->text, SIZE_MAX, &fits) && fits);
 }
 
 static const char *server(void)
@@ -304,12 +307,14 @@ TEST(lsp_fills_up)
 	const char *argv[] = { server(), nullptr };
 	struct poor_loop loop;
 	size_t filled;
+	bool fits;
 
 	loop_init(&loop);
 	log_init(&loop, "lsp-test");
 	text_init(&big.text, big.bytes, big.lines, big.states);
 	memset(big.bytes, 'a', sizeof(big.bytes));
-	assert(text_load(&big.text, sizeof(big.bytes)));
+	text_begin(&big.text, sizeof(big.bytes));
+	assert(text_index(&big.text, SIZE_MAX, &fits) && fits);
 	lsp_init(&lsp, &loop, &listener, &memory);
 	lsp_start(&lsp, "/project dir", argv);
 	run_until(&loop, lsp.state == LSP_READY && !lsp.write_op.pending);

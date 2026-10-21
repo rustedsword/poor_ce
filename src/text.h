@@ -22,6 +22,7 @@ struct text {
 	size_t size, capacity;
 	size_t line_count, line_capacity;
 	size_t columns, widest;
+	size_t indexed, measured, measured_columns;
 	struct text_changes changes[TEXT_MARKS];
 };
 
@@ -43,8 +44,8 @@ void text_init_impl(struct text *text, size_t capacity, char (*bytes)[capacity],
 	text_init_impl(text, ARRAY_SIZE(bytes), &auto_arr(bytes), ARRAY_SIZE(lines), &auto_arr(lines), ARRAY_SIZE(states), \
 		       &auto_arr(states))
 
-/* Index the first 'size' bytes, which the caller put there. If their lines don't fit, the rest is cut off. */
-[[nodiscard]] bool text_load(struct text *text, size_t size);
+void text_begin(struct text *text, size_t size);
+[[nodiscard]] bool text_index(struct text *text, size_t budget, bool *fits);
 /* Whether the document has room to replace the bytes from 'start' to 'end' with 'bytes' */
 bool text_fits_impl(const struct text *text, size_t start, size_t end, size_t size, const char (*bytes)[size]);
 #define text_fits(text, start, end, bytes) text_fits_impl(text, start, end, ARRAY_SIZE(bytes), &auto_arr(bytes))

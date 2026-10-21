@@ -99,20 +99,26 @@ static size_t width(const struct text *text, size_t line)
 	return c.column + c.width;
 }
 
+static void grow(struct text *text, size_t columns)
+{
+	if (columns > text->columns) {
+		text->columns = columns;
+		text->widest = 1;
+	} else if (columns == text->columns) {
+		text->widest++;
+	}
+}
+
 /* Lines that come or go, the widest ones are counted again once none of them is left */
 static void measure(struct text *text, size_t first, size_t count, bool gone)
 {
 	foreach_array_index(arrview(first, count, array_ptr(text->lines, text->line_count)), i) {
 		size_t columns = width(text, first + i);
 
-		if (gone && columns == text->columns) {
+		if (!gone)
+			grow(text, columns);
+		else if (columns == text->columns)
 			text->widest--;
-		} else if (!gone && columns > text->columns) {
-			text->columns = columns;
-			text->widest = 1;
-		} else if (!gone && columns == text->columns) {
-			text->widest++;
-		}
 	}
 	if (!gone && !text->widest) {
 		text->columns = 0;
@@ -120,27 +126,63 @@ static void measure(struct text *text, size_t first, size_t count, bool gone)
 	}
 }
 
-bool text_load(struct text *text, size_t size)
+void text_begin(struct text *text, size_t size)
 {
-	auto bytes = arrview_first(size, array_ptr(text->bytes, text->capacity));
-	bool fits = true;
-
 	assert(size <= text->capacity);
 	text->size = size;
+	text->indexed = text->measured = text->measured_columns = 0;
 	text->line_count = 1;
-	for (const char *p = *bytes; (p = memchr(p, '\n', array_end_ref(bytes) - p)); p++) {
+	text->columns = text->widest = 0;
+	mark_all(text);
+}
+
+static void measure_to(struct text *text, size_t stop, size_t end)
+{
+	struct text_char c;
+
+	c.next = text->measured;
+	c.end = end;
+	c.column = text->measured_columns;
+	c.width = 0;
+	while (c.next < stop && text_chars_next(text, &c))
+		;
+	text->measured = c.next;
+	text->measured_columns = c.column + c.width;
+}
+
+bool text_index(struct text *text, size_t budget, bool *fits)
+{
+	auto bytes = arrview_first(text->size, array_ptr(text->bytes, text->capacity));
+	size_t first = text->line_count - 1, end = budget < text->size - text->indexed ? text->indexed + budget : text->size;
+
+	assert(budget);
+	*fits = true;
+	for (const char *p = &(*bytes)[text->indexed]; (p = memchr(p, '\n', &(*bytes)[end] - p)); p++) {
 		if (text->line_count == text->line_capacity) {
-			text->size = p - *bytes;
-			fits = false;
+			end = text->size = p - *bytes;
+			*fits = false;
 			break;
 		}
+		text->states[text->line_count] = 0;
 		text->lines[text->line_count++] = p + 1 - *bytes;
 	}
-	memset_array(arrview_first(text->line_count, array_ptr(text->states, text->line_capacity)), 0);
-	text->columns = text->widest = 0;
-	measure(text, 0, text->line_count, false);
-	mark_all(text);
-	return fits;
+	text->indexed = end;
+	for (size_t line = first; line + 1 < text->line_count; line++) {
+		size_t line_end = text_line_end(text, line);
+
+		measure_to(text, line_end, line_end);
+		grow(text, text->measured_columns);
+		text->measured = text->lines[line + 1];
+		text->measured_columns = 0;
+	}
+	if (end < text->size) {
+		/* A character in the last three bytes may go on after them, and a \r there may start the line break */
+		measure_to(text, end > 3 ? end - 3 : 0, end);
+		return false;
+	}
+	measure_to(text, text->size, text->size);
+	grow(text, text->measured_columns);
+	return true;
 }
 
 static size_t breaks(size_t size, const char (*bytes)[size])

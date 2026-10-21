@@ -121,7 +121,7 @@ static void project_init(struct project *project)
 static void project_fini(struct project *project)
 {
 	static const char *const names[] = { "main.c", "tar get.h", "sub/notes.txt", ".hidden", ".hidden.swp", "new.c", "big.c",
-					     "variables.c", "copy", "copy.changes", "sub" };
+					     "variables.c", "copy", "copy.changes", "huge.c", "sub" };
 
 	foreach_array_const_ref(names, name) {
 		snprintf_array(project->path, "%s/%s", project->root, *name);
@@ -411,6 +411,7 @@ TEST(editor_waits_for_room)
 	snprintf_array(project.path, "%s/big.c", project.root);
 	editor_open(&editor, project.path);
 	tab = loaded(&editor, &loop);
+	run_until(&loop, tab->lsp_version);
 	type(&editor, XKB_KEY_x, 0, "x");
 	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(editor.request && tab->lsp_version == tab->document.version);
@@ -482,8 +483,7 @@ TEST(editor_goes_to_definitions)
 	snprintf_array(project.path, "%s/main.c", project.root);
 	editor_open(&editor, project.path);
 	tab = loaded(&editor, &loop);
-	run_until(&loop, editor.lsp.state == LSP_READY);
-	assert(tab->lsp_version == tab->document.version);
+	run_until(&loop, tab->lsp_version == tab->document.version);
 	assert(document_place(&tab->document, 25, false));
 	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	assert(editor.request);
@@ -858,7 +858,7 @@ TEST(editor_sends_changes)
 	snprintf_array(project.path, "%s/tar get.h", project.root);
 	editor_open(&editor, project.path);
 	header = loaded(&editor, &loop);
-	run_until(&loop, editor.lsp.state == LSP_READY);
+	run_until(&loop, code->lsp_version && header->lsp_version);
 	type(&editor, XKB_KEY_Return, 0, "\r");
 	assert(header->lsp_version && header->lsp_version != header->document.version);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
@@ -992,6 +992,95 @@ TEST(editor_highlights)
 	run_until(&loop, tab->tokens_version == tab->document.version);
 	stop(&editor, &loop);
 	font_fini(&font);
+	project_fini(&project);
+}
+
+TEST(editor_indexes_in_slices)
+{
+	static struct project project;
+	static struct atlas atlas;
+	static char contents[3 + 3 * EDITOR_INDEX_BYTES + 10 + 1];
+	const struct text *text;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+	size_t size, boundary;
+	bool sliced = false;
+
+	memcpy(contents, "/*\n", 3);
+	for (size = 3; size < 3 + 3 * EDITOR_INDEX_BYTES; size += 2)
+		memcpy(&contents[size], "x\n", 2);
+	memcpy(&contents[size], "*/\nint y;\n", 10);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "big.c", contents);
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = editor_tab(&editor);
+	text = &tab->document.text;
+	run_until(&loop, text->size);
+	while (tab->loading) {
+		sliced |= text->indexed != 0;
+		assert(!poor_loop_run_once(&loop));
+	}
+	assert(sliced && text->size == size + 10 && text->line_count == 3 * EDITOR_INDEX_BYTES / 2 + 4);
+	assert(!tab->document.read_only);
+	boundary = text_line_of(text, EDITOR_INDEX_BYTES) + 1;
+	assert(document_place(&tab->document, text_line_start(text, boundary), false));
+	assert(color_at(&atlas, boundary, 0) == QUAD_RGB(THEME_COMMENT));
+	assert(document_place(&tab->document, text_line_start(text, text->line_count - 2), false));
+	assert(color_at(&atlas, text->line_count - 2, 0) == QUAD_RGB(THEME_TYPE));
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+static size_t indexed(const struct editor_tab *tab)
+{
+	return tab->indexing ? tab->document.text.indexed : tab->loading ? 0 : tab->document.text.size;
+}
+
+TEST(editor_indexes_one_slice_at_a_time)
+{
+	static struct project project;
+	static char contents[8 * EDITOR_INDEX_BYTES + 1];
+	struct editor_tab *first, *second;
+	struct poor_loop loop;
+	size_t before;
+
+	memset(contents, 'x', sizeof(contents) - 1);
+	for (size_t at = 63; at < sizeof(contents) - 1; at += 64)
+		contents[at] = '\n';
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "big.c", contents);
+	write_file(&project, "huge.c", contents);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/big.c", project.root);
+	editor_open(&editor, project.path);
+	first = editor_tab(&editor);
+	run_until(&loop, first->indexing);
+	poor_loop_timer_disarm(&editor.indexing);
+	snprintf_array(project.path, "%s/huge.c", project.root);
+	editor_open(&editor, project.path);
+	second = editor_tab(&editor);
+	run_until(&loop, second->indexing);
+	assert(first->indexing);
+	while (first->loading || second->loading) {
+		before = indexed(first) + indexed(second);
+		assert(!poor_loop_run_once(&loop));
+		assert(indexed(first) + indexed(second) - before <= EDITOR_INDEX_BYTES);
+	}
+	assert(text_is(first, contents) && text_is(second, contents));
+	stop(&editor, &loop);
 	project_fini(&project);
 }
 

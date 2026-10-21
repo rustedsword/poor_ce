@@ -27,12 +27,22 @@ static uint32_t decode(const char *s, size_t size, size_t *length)
 	return utf8_decode(array_ptr(s, size), length);
 }
 
-static bool text_of(struct sample *sample, size_t line_capacity, const char *contents)
+static bool text_sliced(struct sample *sample, size_t line_capacity, const char *contents, size_t budget)
 {
+	bool fits;
+
 	text_init(&sample->text, sample->bytes, arrview_first(line_capacity, sample->lines),
 		  arrview_first(line_capacity, sample->states));
 	copy_array(sample->bytes, array_ptr(contents, strlen(contents)));
-	return text_load(&sample->text, strlen(contents));
+	text_begin(&sample->text, strlen(contents));
+	while (!text_index(&sample->text, budget, &fits))
+		;
+	return fits;
+}
+
+static bool text_of(struct sample *sample, size_t line_capacity, const char *contents)
+{
+	return text_sliced(sample, line_capacity, contents, SIZE_MAX);
 }
 
 static bool text_is(const struct text *text, const char *contents)
@@ -155,6 +165,41 @@ TEST(text_marks)
 	assert(text->changes[1].first == 0 && text->changes[1].last == 4 && text->changes[1].lines == -1);
 }
 
+TEST(text_indexes_in_slices)
+{
+	static struct sample sample;
+	static const char contents[] = "ab\n\tc\n\nlong line\nx";
+	const struct text *text = &sample.text;
+
+	foreach_array_const_ref(((const size_t[]){ 1, 2, 3, 7, SIZE_MAX }), budget) {
+		assert(text_sliced(&sample, 32, contents, *budget) && text_is(text, contents) && text->line_count == 5);
+		assert(text->lines[1] == 3 && text->lines[2] == 6 && text->lines[3] == 7 && text->lines[4] == 17);
+		assert(text->columns == 9 && text->widest == 2);
+		assert(!text_sliced(&sample, 3, contents, *budget) && text_is(text, "ab\n\tc\n") && text->line_count == 3);
+		assert(text->columns == 9 && text->widest == 1);
+	}
+}
+
+/* A line is measured as far as it is indexed, without cutting characters or line breaks in two */
+TEST(text_measures_in_slices)
+{
+	static struct sample sample;
+	static const char mixed[] = "\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80" "e\xcc\x81\t|\r\nab\rc\r\n"
+				    "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\n\r";
+	static const char line[] = "a long line that goes on and on, much longer than any of the slices";
+	struct text *text = &sample.text;
+	bool fits;
+
+	for (size_t budget = 1; budget <= strlen(mixed); budget++)
+		assert(text_sliced(&sample, 32, mixed, budget) && text->columns == 9 && text->widest == 2);
+	text_init(text, sample.bytes, sample.lines, sample.states);
+	copy_array(sample.bytes, arrview_str(line));
+	text_begin(text, strlen(line));
+	while (!text_index(text, 5, &fits))
+		assert(text->indexed - text->measured < 4);
+	assert(text->columns == strlen(line) && text->widest == 1);
+}
+
 TEST(text_columns)
 {
 	static struct sample sample;
@@ -235,7 +280,28 @@ static void document_of(struct editing *editing, const char *contents)
 	editing->document.code = true;
 	view_resize(&editing->document.view, 100, 100, 10, 20, 0);
 	copy_array(editing->bytes, array_ptr(contents, strlen(contents)));
-	assert(document_load(&editing->document, strlen(contents)));
+	document_begin(&editing->document, strlen(contents));
+	assert(document_index(&editing->document, SIZE_MAX) && !editing->document.read_only);
+}
+
+TEST(document_indexes_in_slices)
+{
+	static struct editing editing, whole;
+	static const char contents[] = "/* a\r\nb\r\nc */ int x;\r\n\"s\\\r\nt\"\r\n#define A \\\r\n  1\r\nint y;\r\n";
+	struct document *document = &editing.document;
+
+	document_of(&whole, contents);
+	foreach_array_const_ref(((const size_t[]){ 1, 2, 5, 9 }), budget) {
+		document_init(document, editing.bytes, editing.lines, editing.states, editing.edits, editing.history);
+		document->code = true;
+		copy_array(editing.bytes, array_ptr(contents, strlen(contents)));
+		document_begin(document, strlen(contents));
+		while (!document_index(document, *budget))
+			;
+		assert(document->text.line_count == whole.document.text.line_count && !document->read_only && document->crlf);
+		assert(!memcmp(editing.states, whole.states, document->text.line_count));
+		assert(document->indent == whole.document.indent);
+	}
 }
 
 static bool type(struct document *document, const char *bytes)
@@ -324,7 +390,8 @@ TEST(document_indents_many)
 		big.bytes[size++] = '\n';
 	}
 	copy_array(arrview_first(size, original), arrview_first(size, big.bytes));
-	assert(document_load(document, size) && document_select_all(document) && document_indent(document, false));
+	document_begin(document, size);
+	assert(document_index(document, SIZE_MAX) && document_select_all(document) && document_indent(document, false));
 	assert(document->text.size == size + full && !memcmp(big.bytes, "\n\tx\n\tx\n\n\tx\n", 11));
 	assert(document_undo(document) && document->text.size == size && !memcmp(big.bytes, original, size));
 	assert(!document_undo(document) && document_redo(document) && document->text.size == size + full);

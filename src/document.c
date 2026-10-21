@@ -64,23 +64,31 @@ void document_init_impl(struct document *document, size_t capacity, char (*bytes
 	document->crlf = document->code = document->read_only = false;
 }
 
-bool document_load(struct document *document, size_t size)
+void document_begin(struct document *document, size_t size)
 {
-	struct text *text = &document->text;
-	bool fits = text_load(text, size);
-
+	text_begin(&document->text, size);
 	history_clear(&document->history);
 	view_select(&document->view, 0, 0);
 	document->view.top = document->view.left = 0;
 	document->goal = SIZE_MAX;
 	document->version++;
 	document->streak = DOCUMENT_NONE;
+}
+
+bool document_index(struct document *document, size_t budget)
+{
+	struct text *text = &document->text;
+	size_t first = text->line_count - 1;
+	bool fits, done = text_index(text, budget, &fits);
+
+	if (document->code)
+		syntax_update(text, first, text->line_count - 1);
+	if (!done)
+		return false;
 	document->read_only = !fits;
 	document->crlf = text->line_count > 1 && text_line_end(text, 0) + 2 == text_line_start(text, 1);
 	document->indent = indentation(text);
-	if (document->code)
-		syntax_update(text, 0, text->line_count - 1);
-	return fits;
+	return true;
 }
 
 static bool place(struct document *document, size_t caret, bool extend)
