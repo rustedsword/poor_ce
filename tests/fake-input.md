@@ -39,6 +39,7 @@ capture of the default window of 1280x800 is 2560x1600 pixels.
 | `drag X Y X Y`      | drag with the left button                             |
 | `wheel N`           | turn the wheel by N notches, positive is up           |
 | `sleep MS`          | wait, for example for clangd                          |
+| `run COMMAND`       | run a shell command and wait for it, like a capture   |
 
 Key names: letters, digits, `f1`-`f12`, `ctrl`, `shift`, `alt`, `altgr`, `super`, `esc`, `tab`, `enter`, `space`,
 `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, `left`, `right`, `up`, `down`, `minus`, `equal`,

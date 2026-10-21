@@ -86,7 +86,8 @@ static struct {
 			"  click X Y           click, and middle, right and double click\n"
 			"  drag X Y X Y        drag with the left button\n"
 			"  wheel N             turn the wheel by N notches, positive is up\n"
-			"  sleep MS            wait\n");
+			"  sleep MS            wait\n"
+			"  run COMMAND         run a shell command and wait for it, like a capture between inputs\n");
 	exit(2);
 }
 
@@ -206,6 +207,15 @@ static void commands(int count, char **argv, bool run)
 		if (!strcmp(command, "key") || !strcmp(command, "type")) {
 			if (++i == count || !(command[0] == 'k' ? chord(argv[i], run) : type(argv[i], run)))
 				usage();
+			continue;
+		}
+		if (!strcmp(command, "run")) {
+			if (++i == count)
+				usage();
+			if (run && system(argv[i])) {
+				fprintf(stderr, "fake-input: '%s' failed\n", argv[i]);
+				exit(1);
+			}
 			continue;
 		}
 		if (!strcmp(command, "down") || !strcmp(command, "up")) {
