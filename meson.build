@@ -26,6 +26,7 @@ add_project_arguments(
 		'-Wno-unused-parameter',
 		'-Wstrict-prototypes',
 		'-Wmissing-prototypes',
+		'-Wno-gnu-folding-constant',
 		# Array views of no elements are variable length arrays of zero length
 		'-fno-sanitize=vla-bound',
 	]),
