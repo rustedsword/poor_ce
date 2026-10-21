@@ -388,14 +388,19 @@ static void loaded(struct editor_tab *tab)
 	poor_loop_timer_arm(editor->loop, &editor->highlight, 0);
 }
 
+static bool indexing(const struct editor_tab *tab)
+{
+	return tab->indexing || (!tab->loading && text_remeasuring(&tab->document.text));
+}
+
 static struct editor_tab *indexing_tab(struct editor *editor)
 {
 	struct editor_tab *shown = editor_tab(editor);
 
-	if (shown && shown->indexing)
+	if (shown && indexing(shown))
 		return shown;
 	foreach_array_ref(editor->tabs, tab)
-		if (tab->used && tab->indexing)
+		if (tab->used && indexing(tab))
 			return tab;
 	return nullptr;
 }
@@ -407,7 +412,10 @@ static void on_index(struct poor_loop *loop, struct poor_loop_timer *timer)
 
 	if (!tab)
 		return;
-	if (document_index(&tab->document, EDITOR_INDEX_BYTES)) {
+	if (!tab->indexing) {
+		if (text_remeasure(&tab->document.text, EDITOR_INDEX_BYTES) && view_scroll(&tab->document.view, 0, 0))
+			changed(editor);
+	} else if (document_index(&tab->document, EDITOR_INDEX_BYTES)) {
 		tab->indexing = false;
 		loaded(tab);
 	}
@@ -911,6 +919,8 @@ static void update(struct editor *editor, bool done)
 {
 	if (!done)
 		return;
+	if (indexing_tab(editor))
+		poor_loop_timer_arm(editor->loop, &editor->indexing, 0);
 	editor_layout(editor);
 	highlight(editor);
 	changed(editor);

@@ -99,10 +99,12 @@ TEST(text_editing)
 	assert(text->columns == 4 && text->widest == 1);
 	assert(!text_fits(text, 0, 0, arrview_str("1\n2\n3\n4\n5\n6\n7")) && text_fits(text, 0, 8, arrview_str("1\n2\n3\n4\n5\n6\n7")));
 	assert(text_replace(text, 0, text->size, arrview_str("1\n2\n3\n4\n5\n6\n7")) && text->line_count == 7);
-	assert(text->columns == 1 && text->widest == 7);
+	assert(text->columns == 4 && text_remeasuring(text));
+	assert(text_remeasure(text, SIZE_MAX) && text->columns == 1 && text->widest == 7);
 	assert(!text_replace(text, 0, 0, arrview_str("\n\n")) && text_is(text, "1\n2\n3\n4\n5\n6\n7"));
 	assert(text_replace(text, 0, 1, arrview_str("long")) && text->columns == 4 && text->widest == 1);
-	assert(text_replace_impl(text, 0, text->size, 0, &"") && text_is(text, "") && text->line_count == 1 && !text->columns);
+	assert(text_replace_impl(text, 0, text->size, 0, &"") && text_is(text, "") && text->line_count == 1);
+	assert(text->columns == 4 && text_remeasure(text, SIZE_MAX) && !text->columns && text->widest == 1);
 	assert(text_of(&sample, 8, "e\xcc\x81x\r\ny"));
 	assert(text_next(text, 0) == 3 && text_next(text, 3) == 4 && text_next(text, 4) == 6 && text_next(text, 7) == 7);
 	assert(text_prev(text, 6) == 4 && text_prev(text, 4) == 3 && text_prev(text, 3) == 0 && text_prev(text, 0) == 0);
@@ -127,7 +129,8 @@ TEST(text_prefixes)
 	text_unprefix(text, 1, 3, cut_two, nullptr);
 	assert(text_is(text, "--ab\r\n\ncd\ne") && text->lines[2] == 7 && text->lines[3] == 10 && text->columns == 4);
 	text_unprefix(text, 0, 0, cut_two, nullptr);
-	assert(text_is(text, "ab\r\n\ncd\ne") && text->lines[1] == 4 && text->columns == 2);
+	assert(text_is(text, "ab\r\n\ncd\ne") && text->lines[1] == 4 && text->columns == 4 && text_remeasuring(text));
+	assert(text_remeasure(text, SIZE_MAX) && text->columns == 2 && text->widest == 2);
 	memset(wide, 'x', sizeof(wide));
 	assert(!text_prefix(text, 0, 3, wide) && text_is(text, "ab\r\n\ncd\ne"));
 }
@@ -198,6 +201,82 @@ TEST(text_measures_in_slices)
 	while (!text_index(text, 5, &fits))
 		assert(text->indexed - text->measured < 4);
 	assert(text->columns == strlen(line) && text->widest == 1);
+}
+
+TEST(text_remeasures_in_slices)
+{
+	static struct sample sample;
+	static const char contents[] = "short\n\tx\n\xc3\xa9\xe2\x82\xac e\xcc\x81\xf0\x9f\x98\x80\r\nthe widest line of them all\nend";
+	struct text *text = &sample.text;
+	size_t end, before, slices;
+
+	for (size_t budget = 1; budget <= strlen(contents); budget++) {
+		assert(text_of(&sample, 32, contents) && text->columns == 27 && text->widest == 1);
+		end = text_line_end(text, 3);
+		assert(text_replace_impl(text, end - 1, end, 0, &"") && text->columns == 27 && text_remeasuring(text));
+		for (slices = 1, before = text->measured; !text_remeasure(text, budget); slices++, before = text->measured)
+			assert(text->columns == 27 && text->measured - before <= budget + 5);
+		assert(text->columns == 26 && text->widest == 1 && (slices > 1) == (budget < text->size));
+	}
+	assert(text_of(&sample, 32, "abc\nab\nx"));
+	assert(text_replace_impl(text, 2, 3, 0, &"") && text->columns == 3 && text_remeasuring(text));
+	assert(text_replace(text, 5, 5, arrview_str("z")) && !text_remeasuring(text) && text->columns == 3 && text->widest == 1);
+}
+
+static size_t widest_of(const struct text *text, size_t *count)
+{
+	size_t columns = 0;
+
+	*count = 0;
+	for (size_t line = 0; line < text->line_count; line++) {
+		size_t width = text_column_of(text, line, text_line_end(text, line));
+
+		if (width > columns) {
+			columns = width;
+			*count = 0;
+		}
+		*count += width == columns;
+	}
+	return columns;
+}
+
+static uint32_t next_random(uint32_t *seed)
+{
+	*seed = *seed * 1103515245 + 12345;
+	return *seed >> 16;
+}
+
+TEST(text_remeasures_while_edited)
+{
+	static struct sample sample;
+	static const char *const inserts[] = { "", "x", "\t", "\xc3\xa9", "e\xcc\x81", "\n", "\r\n", "abcdefghijkl",
+					       "a line wider than the others\n" };
+	struct text *text = &sample.text;
+	uint32_t seed = 1;
+	size_t columns, widest;
+
+	assert(text_of(&sample, 32, "one\n\ttwo\nthree three\r\nfour\n"));
+	for (size_t step = 0; step < 20000; step++) {
+		uint32_t pick = next_random(&seed) % 8;
+		size_t start = next_random(&seed) % (text->size + 1), end = start + next_random(&seed) % (text->size - start + 1) % 16;
+		size_t first = next_random(&seed) % text->line_count, last = first + next_random(&seed) % (text->line_count - first);
+		const char *bytes = inserts[next_random(&seed) % ARRAY_SIZE(inserts)];
+
+		if (pick < 3)
+			text_remeasure(text, 1 + next_random(&seed) % 32);
+		else if (pick < 6 && !text_replace_impl(text, start, end, strlen(bytes), array_ptr(bytes, strlen(bytes))))
+			continue;
+		else if (pick == 6 && !text_prefix(text, first, last, arrview_str("--")))
+			continue;
+		else if (pick == 7)
+			text_unprefix(text, first, last, cut_two, nullptr);
+		columns = widest_of(text, &widest);
+		assert(text->columns >= columns);
+		assert(text_remeasuring(text) || (text->columns == columns && text->widest == widest));
+	}
+	assert(text_remeasure(text, SIZE_MAX));
+	columns = widest_of(text, &widest);
+	assert(text->columns == columns && text->widest == widest);
 }
 
 TEST(text_columns)

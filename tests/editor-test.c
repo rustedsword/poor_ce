@@ -1084,6 +1084,85 @@ TEST(editor_indexes_one_slice_at_a_time)
 	project_fini(&project);
 }
 
+TEST(editor_remeasures_in_slices)
+{
+	static struct project project;
+	static char contents[8 * EDITOR_INDEX_BYTES + 1];
+	const struct text *text;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	size_t left, before, slices = 0;
+
+	memset(contents, 'x', sizeof(contents) - 1);
+	for (size_t at = 63; at < sizeof(contents) - 1; at += 64)
+		contents[at] = '\n';
+	memset(&contents[1000 * 64], 'x', 4 * 64 - 1);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "big.c", contents);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	text = &tab->document.text;
+	assert(text->columns == 255 && text->widest == 1 && text_line_of(text, 1000 * 64) == 1000);
+	assert(document_place(&tab->document, text_line_end(text, 1000), false) && (left = tab->document.view.left));
+	type(&editor, XKB_KEY_BackSpace, 0, "");
+	assert(text_line_end(text, 1000) - text_line_start(text, 1000) == 254);
+	assert(text->columns == 255 && text_remeasuring(text) && tab->document.view.left == left);
+	while (text_remeasuring(text)) {
+		before = text->measured;
+		assert(!poor_loop_run_once(&loop));
+		assert(text->measured - before <= EDITOR_INDEX_BYTES + 3);
+		slices++;
+	}
+	assert(slices > 1 && text->columns == 254 && text->widest == 1 && tab->document.view.left == left - 1);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+TEST(editor_remeasures_tabs_in_the_background)
+{
+	static struct project project;
+	static char contents[8 * EDITOR_INDEX_BYTES + 1];
+	struct editor_tab *big, *small;
+	const struct text *text;
+	struct poor_loop loop;
+
+	memset(contents, 'x', sizeof(contents) - 1);
+	for (size_t at = 63; at < sizeof(contents) - 1; at += 64)
+		contents[at] = '\n';
+	memset(&contents[1000 * 64], 'x', 4 * 64 - 1);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "big.c", contents);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	big = loaded(&editor, &loop);
+	text = &big->document.text;
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	small = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	assert(editor_tab(&editor) == big);
+	assert(document_place(&big->document, text_line_start(text, 1000), false));
+	assert(document_place(&big->document, text_line_start(text, 1000) + 10, true));
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	assert(editor_tab(&editor) == small);
+	editor_paste(&editor, arrview_str("y"));
+	assert(text->columns == 255 && text_remeasuring(text) && poor_loop_timer_armed(&editor.indexing));
+	run_until(&loop, !text_remeasuring(text));
+	assert(text->columns == 246 && text->widest == 1 && editor_tab(&editor) == small);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
 /* Parameters, locals and globals have colors of their own, read only globals that of constants */
 TEST(editor_colors_variables)
 {

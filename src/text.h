@@ -23,6 +23,7 @@ struct text {
 	size_t line_count, line_capacity;
 	size_t columns, widest;
 	size_t indexed, measured, measured_columns;
+	size_t remeasured, remeasured_columns, remeasured_widest;
 	struct text_changes changes[TEXT_MARKS];
 };
 
@@ -46,6 +47,9 @@ void text_init_impl(struct text *text, size_t capacity, char (*bytes)[capacity],
 
 void text_begin(struct text *text, size_t size);
 [[nodiscard]] bool text_index(struct text *text, size_t budget, bool *fits);
+/* While the widest lines are counted again, 'columns' may be wider than any line */
+bool text_remeasuring(const struct text *text);
+bool text_remeasure(struct text *text, size_t budget);
 /* Whether the document has room to replace the bytes from 'start' to 'end' with 'bytes' */
 bool text_fits_impl(const struct text *text, size_t start, size_t end, size_t size, const char (*bytes)[size]);
 #define text_fits(text, start, end, bytes) text_fits_impl(text, start, end, ARRAY_SIZE(bytes), &auto_arr(bytes))

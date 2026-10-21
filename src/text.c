@@ -74,6 +74,11 @@ static void changed(struct text *text, size_t first, size_t last, size_t count)
 		changes->last = from <= to && to > end ? to : end;
 		changes->lines += added;
 	}
+	if (!text->widest && first <= text->remeasured) {
+		text->remeasured = last < text->remeasured ? (size_t)((ptrdiff_t)text->remeasured + added) : first;
+		text->measured = text->lines[text->remeasured];
+		text->measured_columns = 0;
+	}
 }
 
 size_t text_marked_line(const struct text *text, size_t mark, size_t line)
@@ -99,14 +104,20 @@ static size_t width(const struct text *text, size_t line)
 	return c.column + c.width;
 }
 
-static void grow(struct text *text, size_t columns)
+static void grow(size_t *columns, size_t *widest, size_t width)
 {
-	if (columns > text->columns) {
-		text->columns = columns;
-		text->widest = 1;
-	} else if (columns == text->columns) {
-		text->widest++;
+	if (width > *columns) {
+		*columns = width;
+		*widest = 1;
+	} else if (width == *columns) {
+		++*widest;
 	}
+}
+
+static void recount(struct text *text)
+{
+	text->remeasured = text->measured = text->measured_columns = 0;
+	text->remeasured_columns = text->remeasured_widest = 0;
 }
 
 /* Lines that come or go, the widest ones are counted again once none of them is left */
@@ -114,15 +125,18 @@ static void measure(struct text *text, size_t first, size_t count, bool gone)
 {
 	foreach_array_index(arrview(first, count, array_ptr(text->lines, text->line_count)), i) {
 		size_t columns = width(text, first + i);
+		bool counted = !text->widest && first + i < text->remeasured;
 
-		if (!gone)
-			grow(text, columns);
-		else if (columns == text->columns)
-			text->widest--;
-	}
-	if (!gone && !text->widest) {
-		text->columns = 0;
-		measure(text, 0, text->line_count, false);
+		if (!gone) {
+			if (counted)
+				grow(&text->remeasured_columns, &text->remeasured_widest, columns);
+			grow(&text->columns, &text->widest, columns);
+			continue;
+		}
+		if (counted && columns == text->remeasured_columns && !--text->remeasured_widest)
+			recount(text);
+		if (columns == text->columns && !--text->widest)
+			recount(text);
 	}
 }
 
@@ -171,7 +185,7 @@ bool text_index(struct text *text, size_t budget, bool *fits)
 		size_t line_end = text_line_end(text, line);
 
 		measure_to(text, line_end, line_end);
-		grow(text, text->measured_columns);
+		grow(&text->columns, &text->widest, text->measured_columns);
 		text->measured = text->lines[line + 1];
 		text->measured_columns = 0;
 	}
@@ -181,8 +195,39 @@ bool text_index(struct text *text, size_t budget, bool *fits)
 		return false;
 	}
 	measure_to(text, text->size, text->size);
-	grow(text, text->measured_columns);
+	grow(&text->columns, &text->widest, text->measured_columns);
 	return true;
+}
+
+bool text_remeasuring(const struct text *text)
+{
+	return !text->widest;
+}
+
+bool text_remeasure(struct text *text, size_t budget)
+{
+	size_t end;
+
+	assert(budget);
+	if (text->widest)
+		return true;
+	end = budget < SIZE_MAX - text->measured ? text->measured + budget : SIZE_MAX;
+	while (text->measured < end) {
+		size_t line_end = text_line_end(text, text->remeasured);
+
+		measure_to(text, end < line_end ? end : line_end, line_end);
+		if (text->measured < line_end)
+			return false;
+		grow(&text->remeasured_columns, &text->remeasured_widest, text->measured_columns);
+		if (++text->remeasured == text->line_count) {
+			text->columns = text->remeasured_columns;
+			text->widest = text->remeasured_widest;
+			return true;
+		}
+		text->measured = text->lines[text->remeasured];
+		text->measured_columns = 0;
+	}
+	return false;
 }
 
 static size_t breaks(size_t size, const char (*bytes)[size])
@@ -232,8 +277,8 @@ bool text_replace_impl(struct text *text, size_t start, size_t end, size_t size,
 		*next = *next - (end - start) + size;
 	text->size = text->size - (end - start) + size;
 	text->line_count = line_count;
-	measure(text, first, added + 1, false);
 	changed(text, first, last, added + 1);
+	measure(text, first, added + 1, false);
 	return true;
 }
 
@@ -274,8 +319,8 @@ bool text_prefix_impl(struct text *text, size_t first, size_t last, size_t size,
 	foreach_array_ref(arrview(last + 1, text->line_count - last - 1, lines), line)
 		*line += grow;
 	text->size += grow;
-	measure(text, first, last - first + 1, false);
 	changed(text, first, last, last - first + 1);
+	measure(text, first, last - first + 1, false);
 	return true;
 }
 
@@ -302,8 +347,8 @@ void text_unprefix(struct text *text, size_t first, size_t last, size_t (*cut)(c
 	foreach_array_ref(arrview(last + 1, text->line_count - last - 1, lines), line)
 		*line -= removed;
 	text->size -= removed;
-	measure(text, first, last - first + 1, false);
 	changed(text, first, last, last - first + 1);
+	measure(text, first, last - first + 1, false);
 }
 
 size_t text_line_start(const struct text *text, size_t line)
