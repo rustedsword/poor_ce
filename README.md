@@ -7,7 +7,7 @@ Ultra simple text editor with a nuclear core.
  * Code-base navigation: go to definition, back, forward.
  * No configuration. A single embedded font.
 
-![ce with a small C project](data/screenshot.png)
+![ce opening a file from the tree, typing a line and going to a definition](data/demo.webp)
 
 ## Build
 
