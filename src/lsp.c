@@ -150,7 +150,8 @@ static bool post(struct lsp *lsp)
 	char header[HEADER_BYTES];
 
 	if (lsp->message.overflow) {
-		log_printf("ce: a message to %s doesn't fit\n", lsp->argv[0]);
+		if (!start)
+			log_printf("ce: a message to %s doesn't fit\n", lsp->argv[0]);
 		return false;
 	}
 	length = snprintf_array(header, "Content-Length: %zu\r\n\r\n", size);
