@@ -31,7 +31,8 @@ enum document_streak : uint8_t {
 /*
  * A text that is edited: the view holds the selection and what shows of the text, the history what can be undone.
  * 'goal' is the column that the caret keeps while it goes up and down, 'version' changes with every edit and
- * 'indent' is the number of spaces of a level of indentation, 0 for a tab. Only code is highlighted.
+ * 'indent' is the number of spaces of a level of indentation, 0 for a tab. Only code is highlighted, and a 'literal'
+ * document takes what is typed as it is.
  */
 struct document {
 	struct text text;
@@ -40,7 +41,7 @@ struct document {
 	size_t goal, indent;
 	uint64_t version;
 	enum document_streak streak;
-	bool crlf, code, read_only;
+	bool crlf, code, literal, read_only;
 };
 
 /* An empty document in memory of the caller: its bytes and lines, and what can be undone */
@@ -58,11 +59,12 @@ void document_begin(struct document *document, size_t size);
 bool document_move(struct document *document, enum document_motion motion, bool extend);
 /* The caret goes to the character boundary 'offset', and so does the anchor unless the selection extends */
 bool document_place(struct document *document, size_t offset, bool extend);
+bool document_select(struct document *document, size_t anchor, size_t caret);
 bool document_select_word(struct document *document, size_t offset);
 bool document_select_line(struct document *document, size_t offset);
 bool document_select_all(struct document *document);
 
-/* Replace the selection with 'bytes'. Typed ones join the typing before them, a typed } outdents a blank line. */
+/* Replace the selection with 'bytes'. Typed ones join the typing before them, a typed } outdents a blank line unless literal. */
 bool document_insert_impl(struct document *document, size_t size, const char (*bytes)[size], bool typed);
 #define document_insert(document, bytes, typed) document_insert_impl(document, ARRAY_SIZE(bytes), &auto_arr(bytes), typed)
 /* A line break with the indentation of the line, one level deeper after a { */

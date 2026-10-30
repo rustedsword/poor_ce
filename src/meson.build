@@ -43,7 +43,7 @@ foreach shader : [ 'text.vert', 'text.frag' ]
 endforeach
 
 ce_inc = include_directories('.')
-text_sources = files('text.c', 'view.c', 'history.c', 'document.c', 'syntax.c', 'json.c', 'path.c')
+text_sources = files('text.c', 'view.c', 'history.c', 'document.c', 'syntax.c', 'json.c', 'path.c', 'search.c')
 font_sources = files('font.c', 'atlas.c')
 log_sources = files('logger.c')
 seat_sources = files('seat.c')

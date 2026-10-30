@@ -1977,3 +1977,502 @@ TEST(editor_tree_browses_from_unread_directories)
 	stop(&editor, &loop);
 	project_fini(&project);
 }
+
+static void counted(struct poor_loop *loop, const struct editor_tab *tab)
+{
+	run_until(loop, editor.search_counted == tab->document.text.size);
+}
+
+static bool query_is(const char *contents, size_t anchor, size_t caret)
+{
+	const struct document *query = &editor.query;
+
+	return query->text.size == strlen(contents) && !memcmp(query->text.bytes, contents, query->text.size) &&
+	       query->view.anchor == anchor && query->view.caret == caret;
+}
+
+/*
+ * Ctrl+F finds what is typed from the caret on, letters in either case unless the query has capitals. Enter goes to
+ * the next match and Shift+Enter to the one before, around the ends. A query without matches leaves the caret where
+ * the search was, Esc leaves the match selected for F3.
+ */
+TEST(editor_searches)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	assert(document_place(&tab->document, 5, false));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	counted(&loop, tab);
+	assert(editor.searching && caret_of(tab, 11, 12) && editor.search_index == 2 && editor.search_count == 3);
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(caret_of(tab, 22, 23) && editor.search_index == 3);
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(caret_of(tab, 4, 5) && editor.search_index == 1);
+	type(&editor, XKB_KEY_Return, SEAT_SHIFT, "\r");
+	assert(caret_of(tab, 22, 23) && editor.search_index == 3);
+	type(&editor, XKB_KEY_BackSpace, 0, "");
+	assert(caret_of(tab, 22, 22));
+	type(&editor, XKB_KEY_x, SEAT_SHIFT, "X");
+	counted(&loop, tab);
+	assert(caret_of(tab, 11, 12) && editor.search_index == 1 && editor.search_count == 1);
+	type(&editor, XKB_KEY_q, 0, "q");
+	counted(&loop, tab);
+	assert(caret_of(tab, 22, 22) && !editor.search_count);
+	type(&editor, XKB_KEY_Escape, 0, "");
+	type(&editor, XKB_KEY_F3, 0, "");
+	assert(!editor.searching && !strcmp(editor.status, "\"Xq\" isn't in main.c"));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_i, 0, "i");
+	type(&editor, XKB_KEY_n, 0, "n");
+	type(&editor, XKB_KEY_t, 0, "t");
+	assert(caret_of(tab, 0, 3));
+	type(&editor, XKB_KEY_Escape, 0, "");
+	type(&editor, XKB_KEY_F3, 0, "");
+	assert(!editor.searching && caret_of(tab, 7, 10));
+	type(&editor, XKB_KEY_F3, SEAT_SHIFT, "");
+	type(&editor, XKB_KEY_F3, SEAT_SHIFT, "");
+	assert(caret_of(tab, 7, 10) && text_is(tab, "int x;\nint X2;\nreturn x;\n"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/*
+ * The selection becomes the query, all selected, which keys edit like a line of a document while the document stays
+ * as it is. A click in the text or another tab ends the search.
+ */
+TEST(editor_searches_the_selection)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	unsigned pastes = events.pastes;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_a, 0, "a");
+	assert(document_place(&tab->document, 16, false) && document_place(&tab->document, 22, true));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	counted(&loop, tab);
+	assert(query_is("return", 0, 6) && caret_of(tab, 16, 22) && editor.search_index == 1 && editor.search_count == 1);
+	type(&editor, XKB_KEY_End, 0, "");
+	type(&editor, XKB_KEY_space, 0, " ");
+	assert(query_is("return ", 7, 7) && caret_of(tab, 16, 23));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Right, 0, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	assert(query_is("return x", 8, 8) && caret_of(tab, 16, 24));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Left, 0, "");
+	assert(query_is("return x", 0, 0));
+	type(&editor, XKB_KEY_Delete, 0, "");
+	assert(query_is("eturn x", 0, 0) && caret_of(tab, 17, 24));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	assert(query_is("x", 1, 1) && caret_of(tab, 23, 24));
+	type(&editor, XKB_KEY_z, SEAT_CONTROL, "");
+	assert(query_is("eturn x", 0, 7) && caret_of(tab, 17, 24));
+	type(&editor, XKB_KEY_z, SEAT_CONTROL | SEAT_SHIFT, "");
+	assert(query_is("x", 1, 1) && caret_of(tab, 23, 24) && text_is(tab, "aint x;\nint X2;\nreturn x;\n"));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	assert(events.pastes == pastes + 1 && !events.primary);
+	editor_paste(&editor, arrview_str("X2;\nreturn"));
+	assert(editor.search.size == 3 && caret_of(tab, 12, 15) && text_is(tab, "aint x;\nint X2;\nreturn x;\n"));
+	click(editor.text_rect.x + 5, editor.text_rect.y + 5, 0);
+	assert(!editor.searching && caret_of(tab, 0, 0));
+	snprintf_array(project.path, "%s/tar get.h", project.root);
+	editor_open(&editor, project.path);
+	loaded(&editor, &loop);
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	assert(editor_tab(&editor) == tab && !editor.searching);
+	type(&editor, XKB_KEY_x, 0, "x");
+	assert(text_is(tab, "xaint x;\nint X2;\nreturn x;\n"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* Whether a solid quad of 'color' covers 'cells' cells from 'column' of 'line' of the shown document */
+static bool shaded(struct atlas *atlas, size_t line, size_t column, size_t cells, uint32_t color)
+{
+	static struct frame frame;
+	const struct view *view = &editor_tab(&editor)->document.view;
+	int32_t x = editor.text_rect.x + view->padding + (column - view->left) * editor.cell_width;
+	int32_t y = editor.text_rect.y + view->padding + (line - view->top) * editor.cell_height;
+
+	scene_build(&editor, atlas, &frame);
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad)
+		if (quad->u == QUAD_SOLID && quad->color == color && quad->x == x && quad->y == y &&
+		    quad->width == cells * editor.cell_width && quad->height == editor.cell_height)
+			return true;
+	return false;
+}
+
+/* Matches show while the search goes on, overlapping ones as one, the selected one as the selection */
+TEST(editor_shows_matches)
+{
+	static struct project project;
+	static struct atlas atlas;
+	static struct frame frame;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+	int32_t x, y;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "xaaax aa\n");
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_focus(&editor, true);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	assert(document_place(&tab->document, 6, false) && document_place(&tab->document, 8, true));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	x = editor.status_rect.x + editor.padding + 6 * editor.cell_width;
+	y = editor.status_rect.y + editor.padding;
+	scene_build(&editor, &atlas, &frame);
+	assert(shaded(&atlas, 0, 1, 3, QUAD_RGB(THEME_MATCH)) && shaded(&atlas, 0, 6, 2, QUAD_RGB(THEME_SELECTION)));
+	assert(caret_color(&atlas, &frame) == QUAD_RGB(THEME_DIM));
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad)
+		if (quad->u == QUAD_SOLID && quad->color == QUAD_RGB(THEME_SELECTION) && quad->y == y)
+			assert(quad->x == x && quad->width == 2 * editor.cell_width);
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(shaded(&atlas, 0, 1, 2, QUAD_RGB(THEME_SELECTION)) && shaded(&atlas, 0, 6, 2, QUAD_RGB(THEME_MATCH)));
+	type(&editor, XKB_KEY_Escape, 0, "");
+	assert(!shaded(&atlas, 0, 6, 2, QUAD_RGB(THEME_MATCH)) && caret_color(&atlas, &frame) == QUAD_RGB(THEME_CARET));
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+TEST(editor_counts_matches_in_slices)
+{
+	static struct project project;
+	static char contents[5 * EDITOR_COUNT_BYTES / 2 + 1];
+	const struct text *text;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	size_t before, slices = 0;
+
+	memset(contents, 'x', sizeof(contents) - 1);
+	for (size_t at = 63; at < sizeof(contents) - 1; at += 64)
+		contents[at] = '\n';
+	for (size_t at = 10; at < sizeof(contents) - 1; at += 64)
+		contents[at] = 'y';
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "big.c", contents);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	text = &tab->document.text;
+	assert(document_place(&tab->document, text_line_start(text, 1000), false));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_y, 0, "y");
+	assert(caret_of(tab, text_line_start(text, 1000) + 10, text_line_start(text, 1000) + 11));
+	while (editor.search_counted < text->size) {
+		before = editor.search_counted;
+		assert(!poor_loop_run_once(&loop));
+		assert(editor.search_counted - before <= EDITOR_COUNT_BYTES);
+		slices++;
+	}
+	assert(slices > 1 && editor.search_count == text->line_count - 1 && editor.search_index == 1001);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* A late paste into another document leaves the search alone, and one into the query goes nowhere once its search ends */
+TEST(editor_searches_through_late_pastes)
+{
+	static struct project project;
+	struct editor_tab *code, *header;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	code = loaded(&editor, &loop);
+	snprintf_array(project.path, "%s/tar get.h", project.root);
+	editor_open(&editor, project.path);
+	header = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	editor_paste(&editor, arrview_str("y"));
+	assert(text_is(header, "y/* */\n\n    int x;\n") && editor.searching && caret_of(code, 25, 26));
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Escape, 0, "");
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("return"));
+	assert(editor.searching && editor.search.size == 1 && caret_of(code, 25, 26));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* A late paste that can't go in leaves the selection, and the match that the search counted, as they are */
+TEST(editor_searches_through_failed_pastes)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "x x x\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	tab->document.read_only = true;
+	assert(document_place(&tab->document, 5, false));
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	counted(&loop, tab);
+	assert(caret_of(tab, 2, 3) && editor.search_index == 2);
+	editor_paste(&editor, arrview_str("y"));
+	assert(editor.searching && caret_of(tab, 2, 3) && text_is(tab, "x x x\n"));
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(caret_of(tab, 4, 5) && editor.search_index == 3);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* A match that starts left of the view shows as far as it reaches into it */
+TEST(editor_shows_matches_left_of_the_view)
+{
+	static struct project project;
+	static struct atlas atlas;
+	static struct frame frame;
+	static char contents[3 + 50 + 3 + 100 + 2];
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+	bool matched = false;
+
+	memset(contents, 'x', sizeof(contents) - 2);
+	memcpy(contents, "\tab", 3);
+	memcpy(&contents[53], "\tab", 3);
+	contents[sizeof(contents) - 2] = '\n';
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", contents);
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_focus(&editor, true);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	assert(document_place(&tab->document, 10, false));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("\tab"));
+	assert(caret_of(tab, 53, 56));
+	editor_scroll(&editor, editor.text_rect.x + 1, editor.text_rect.y + 1, 0, 4 - (ptrdiff_t)tab->document.view.left);
+	assert(tab->document.view.left == 4 && shaded(&atlas, 0, 4, 6, QUAD_RGB(THEME_MATCH)));
+	editor_scroll(&editor, editor.text_rect.x + 1, editor.text_rect.y + 1, 0, 6);
+	scene_build(&editor, &atlas, &frame);
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad)
+		matched |= quad->u == QUAD_SOLID && quad->color == QUAD_RGB(THEME_MATCH);
+	assert(tab->document.view.left == 10 && !matched);
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+/* While searching, a status gives way to the query after a while, unless it asks something. Otherwise it stays. */
+TEST(editor_searches_through_statuses)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "%s/main.c", project.root);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_w, SEAT_CONTROL, "");
+	assert(editor.confirm == EDITOR_CLOSING && poor_loop_timer_armed(&editor.prompting));
+	poor_loop_timer_arm(&loop, &editor.prompting, 0);
+	run_until(&loop, !poor_loop_timer_armed(&editor.prompting));
+	assert(editor.searching && editor.status[0]);
+	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
+	run_until(&loop, !tab->saving);
+	assert(!strcmp(editor.status, "main.c is saved") && poor_loop_timer_armed(&editor.prompting));
+	assert(editor.prompting.deadline > poor_loop_now() + EDITOR_PROMPT_NS / 2);
+	poor_loop_timer_arm(&loop, &editor.prompting, 0);
+	run_until(&loop, !editor.status[0]);
+	assert(editor.searching);
+	type(&editor, XKB_KEY_Escape, 0, "");
+	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
+	run_until(&loop, !tab->saving);
+	assert(!strcmp(editor.status, "main.c is saved") && !poor_loop_timer_armed(&editor.prompting));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/*
+ * The query is edited by characters and words like a document, with its clipboard and its history, but takes what is
+ * typed as it is. Its caret shows where it is.
+ */
+TEST(editor_edits_the_query)
+{
+	static struct project project;
+	static struct atlas atlas;
+	static struct frame frame;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+	int32_t x, y;
+	bool shown = false;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_focus(&editor, true);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("int X2"));
+	assert(query_is("int X2", 6, 6) && caret_of(tab, 7, 13));
+	type(&editor, XKB_KEY_Left, SEAT_CONTROL, "");
+	assert(query_is("int X2", 4, 4));
+	x = editor.status_rect.x + editor.padding + (6 + 4) * editor.cell_width;
+	y = editor.status_rect.y + editor.padding;
+	scene_build(&editor, &atlas, &frame);
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad)
+		shown |= quad->u == QUAD_SOLID && quad->color == QUAD_RGB(THEME_CARET) && quad->x == x && quad->y == y;
+	assert(shown);
+	type(&editor, XKB_KEY_BackSpace, SEAT_CONTROL, "");
+	assert(query_is("X2", 0, 0) && caret_of(tab, 11, 13));
+	type(&editor, XKB_KEY_End, SEAT_SHIFT, "");
+	assert(query_is("X2", 0, 2));
+	type(&editor, XKB_KEY_i, 0, "i");
+	assert(query_is("i", 1, 1) && caret_of(tab, 0, 1));
+	type(&editor, XKB_KEY_a, SEAT_CONTROL, "");
+	assert(query_is("i", 0, 1) && events.primary && !strcmp(events.copied, "i"));
+	type(&editor, XKB_KEY_c, SEAT_CONTROL, "");
+	assert(!events.primary && !strcmp(events.copied, "i"));
+	type(&editor, XKB_KEY_x, SEAT_CONTROL, "");
+	assert(query_is("", 0, 0) && caret_of(tab, 0, 0));
+	type(&editor, XKB_KEY_space, 0, " ");
+	type(&editor, XKB_KEY_braceright, SEAT_SHIFT, "}");
+	assert(query_is(" }", 2, 2));
+	type(&editor, XKB_KEY_z, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_z, SEAT_CONTROL, "");
+	assert(query_is("i", 0, 1) && caret_of(tab, 0, 1) && text_is(tab, "int x;\nint X2;\nreturn x;\n"));
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+/*
+ * A click places the caret of the query and two select a word, a drag selects and the middle button pastes where it
+ * is, like in a document. A long query scrolls to keep its caret in sight.
+ */
+TEST(editor_clicks_the_query)
+{
+	static struct project project;
+	static char long_query[SEARCH_BYTES + 10];
+	const struct view *view = &editor.query.view;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	int32_t x, y, cell;
+
+	memset(long_query, 'x', sizeof(long_query));
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("int X2"));
+	cell = editor.cell_width;
+	x = editor.query_rect.x;
+	y = editor.query_rect.y + editor.padding + 1;
+	click(x + 2 * cell, y, 1000);
+	assert(editor.searching && query_is("int X2", 2, 2));
+	click(x + 5 * cell, y, 2000);
+	click(x + 5 * cell, y, 2100);
+	assert(query_is("int X2", 4, 6) && events.primary && !strcmp(events.copied, "X2"));
+	editor_button(&editor, x, y, BTN_LEFT, true, 5000, 0);
+	editor_motion(&editor, x + 3 * cell, y);
+	editor_button(&editor, x + 3 * cell, y, BTN_LEFT, false, 5000, 0);
+	assert(query_is("int X2", 0, 3) && !strcmp(events.copied, "int"));
+	editor_button(&editor, x + 6 * cell, y, BTN_MIDDLE, true, 6000, 0);
+	editor_button(&editor, x + 6 * cell, y, BTN_MIDDLE, false, 6000, 0);
+	assert(query_is("int X2", 6, 6) && events.primary);
+	editor_paste(&editor, arrview_str(";"));
+	assert(query_is("int X2;", 7, 7) && caret_of(tab, 7, 14));
+	type(&editor, XKB_KEY_a, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	editor_paste(&editor, long_query);
+	assert(editor.query.text.size == SEARCH_BYTES && view->left && view->left + view_columns(view) == SEARCH_BYTES + 1);
+	click(x, y, 7000);
+	assert(view->anchor == view->left && view->caret == view->left);
+	type(&editor, XKB_KEY_a, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_i, 0, "i");
+	assert(query_is("i", 1, 1) && !view->left);
+	click(editor.text_rect.x + 5, editor.text_rect.y + 5, 8000);
+	assert(!editor.searching && caret_of(tab, 0, 0));
+	stop(&editor, &loop);
+	project_fini(&project);
+}

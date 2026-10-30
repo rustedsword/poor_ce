@@ -39,6 +39,18 @@ static void changed(struct editor *editor)
 	va_start(ap, fmt);
 	vsnprintf_array(editor->status, fmt, ap);
 	va_end(ap);
+	if (editor->searching)
+		poor_loop_timer_arm(editor->loop, &editor->prompting, poor_loop_now() + EDITOR_PROMPT_NS);
+	changed(editor);
+}
+
+static void on_prompt(struct poor_loop *, struct poor_loop_timer *timer)
+{
+	struct editor *editor = container_of(timer, struct editor, prompting);
+
+	if (editor->confirm != EDITOR_NOTHING)
+		return;
+	editor->status[0] = 0;
 	changed(editor);
 }
 
@@ -62,6 +74,16 @@ static const char *language(const char *path)
 struct editor_tab *editor_tab(const struct editor *editor)
 {
 	return editor->tab_count ? editor->order[editor->active] : nullptr;
+}
+
+/* The document that keys edit: the query while searching */
+static struct document *focus(struct editor *editor)
+{
+	struct editor_tab *tab = editor_tab(editor);
+
+	if (editor->searching)
+		return &editor->query;
+	return tab && !tab->loading ? &tab->document : nullptr;
 }
 
 bool editor_browsing(const struct editor *editor)
@@ -172,14 +194,19 @@ static void on_highlight(struct poor_loop *, struct poor_loop_timer *timer)
 	editor->highlight_version = tab->document.version;
 }
 
+static size_t cells_of(const char *string)
+{
+	size_t cells = 0;
+
+	foreach_array_const_ref(array_ptr(string, strlen(string)), byte)
+		cells += ((unsigned char)*byte & 0xc0) != 0x80;
+	return cells;
+}
+
 /* Cells of a tab: its name between a blank and a mark that closes it or shows changes */
 static size_t tab_cells(const struct editor_tab *tab)
 {
-	size_t cells = 4;
-
-	foreach_array_const_ref(array_ptr(path_name(tab->path), strlen(path_name(tab->path))), byte)
-		cells += ((unsigned char)*byte & 0xc0) != 0x80;
-	return cells;
+	return cells_of(path_name(tab->path)) + 4;
 }
 
 bool editor_tab_extent(const struct editor *editor, size_t index, int32_t *start, int32_t *end)
@@ -221,10 +248,57 @@ static size_t tree_columns(const struct editor *editor, size_t columns)
 	return columns < half ? columns : half;
 }
 
+static const char *server_state(const struct lsp *lsp)
+{
+	switch (lsp->state) {
+	case LSP_OFF:
+		return " is off";
+	case LSP_STARTING:
+		return " is starting";
+	case LSP_READY:
+		return "";
+	case LSP_STOPPING:
+		return " is stopping";
+	case LSP_EXITED:
+		return " exited";
+	}
+	return "";
+}
+
+/* The matches show once they are counted */
+size_t editor_details_impl(const struct editor *editor, size_t size, char (*out)[size])
+{
+	const struct editor_tab *tab = editor_tab(editor);
+	size_t length = 0;
+
+	(*out)[0] = 0;
+	if (editor->searching && editor->search.size && editor->search_counted == editor->search_tab->document.text.size) {
+		size_t count = editor->search_count;
+
+		if (!count)
+			length = snprintf_array(out, "No matches");
+		else if (editor->search_match == SIZE_MAX)
+			length = snprintf_array(out, "%zu %s", count, count == 1 ? "match" : "matches");
+		else
+			length = snprintf_array(out, "%zu of %zu", editor->search_index, count);
+	}
+	if (tab && !tab->loading) {
+		const struct text *text = &tab->document.text;
+		size_t line = text_line_of(text, tab->document.view.caret);
+
+		length += snprintf_array(arrview_cfront(length, out), "%sLn %zu, Col %zu", length ? "   " : "", line + 1,
+					 text_column_of(text, line, tab->document.view.caret) + 1);
+	}
+	if (editor->lsp.argv && length < size)
+		snprintf_array(arrview_cfront(length, out), "%s%s%s", length ? "   " : "", editor->lsp.argv[0],
+			       server_state(&editor->lsp));
+	return cells_of(*out);
+}
+
 /*
  * All views get the size of the text area, which depends on the lines of their documents. A view that narrows for
  * more lines keeps its caret in sight, where an edit left it. The tab bar shows from the first tab, unless the active
- * one wouldn't fit.
+ * one wouldn't fit. The query gets the whole cells between the prompt and the details.
  */
 void editor_layout(struct editor *editor)
 {
@@ -233,14 +307,27 @@ void editor_layout(struct editor *editor)
 	int32_t tree = editor->show_tree ? tree_columns(editor, editor->tree_columns) * editor->cell_width + 2 * editor->padding : 0;
 	int32_t x = tree ? tree + editor->line : 0;
 	int32_t gutter = gutter_width(editor, active);
+	int32_t query = editor->padding + (ARRAY_SIZE(EDITOR_PROMPT) - 1) * editor->cell_width, end;
+	char details[EDITOR_DETAILS];
 
 	if (body < 0)
 		body = 0;
+	end = editor->width - editor->padding - (editor_details(editor, details) + 1) * editor->cell_width;
 	editor->tree_rect = (struct editor_rect){ .x = 0, .y = 0, .width = tree, .height = editor->height - bar };
 	editor->tabs_rect = (struct editor_rect){ .x = x, .y = 0, .width = editor->width - x, .height = bar };
 	editor->status_rect = (struct editor_rect){ .x = 0, .y = editor->height - bar, .width = editor->width, .height = bar };
 	editor->gutter_rect = (struct editor_rect){ .x = x, .y = bar, .width = gutter, .height = body };
 	editor->text_rect = (struct editor_rect){ .x = x + gutter, .y = bar, .width = editor->width - x - gutter, .height = body };
+	editor->query_rect = (struct editor_rect){
+		.x = query,
+		.y = editor->height - bar,
+		.width = end > query ? (end - query) / editor->cell_width * editor->cell_width : 0,
+		.height = bar,
+	};
+	text_remeasure(&editor->query.text, SIZE_MAX);
+	view_resize(&editor->query.view, editor->query_rect.width, editor->cell_height, editor->cell_width,
+		    editor->cell_height, 0);
+	view_reveal(&editor->query.view, editor->query.view.caret);
 	foreach_array_ref(editor->tabs, tab) {
 		if (!tab->used || tab->closing)
 			continue;
@@ -258,10 +345,26 @@ void editor_layout(struct editor *editor)
 	}
 }
 
+static void stop_searching(struct editor *editor)
+{
+	if (!editor->searching)
+		return;
+	editor->searching = false;
+	if (editor->drag == EDITOR_SELECTING)
+		editor->drag = EDITOR_IDLE;
+	if (editor->paste_query)
+		editor->paste_tab = nullptr;
+	poor_loop_timer_disarm(&editor->counting);
+	poor_loop_timer_disarm(&editor->prompting);
+	changed(editor);
+}
+
 static void activate(struct editor *editor, size_t index)
 {
 	editor->active = index;
 	editor->drag = EDITOR_IDLE;
+	if (editor_tab(editor) != editor->search_tab)
+		stop_searching(editor);
 	editor_layout(editor);
 	retitle(editor);
 	highlight(editor);
@@ -712,9 +815,10 @@ void editor_open(struct editor *editor, const char *path)
 /* The offset goes to a file that is read, the position of the server too */
 static void go(struct editor *editor, const char *path, size_t offset, bool lsp, size_t line, size_t character)
 {
-	struct editor_tab *tab = tab_open(editor, path);
+	struct editor_tab *tab;
 
-	if (!tab)
+	stop_searching(editor);
+	if (!(tab = tab_open(editor, path)))
 		return;
 	if (tab->loading) {
 		tab->jump = lsp;
@@ -887,7 +991,7 @@ static const struct tree_listener tree_listener = {
 	.changed = tree_changed,
 };
 
-/* The paste goes to the selection that it was asked for, see editor_paste() */
+/* The paste goes to the selection that it was asked for, or to the query, see editor_paste() */
 static void ask_paste(struct editor *editor, bool primary)
 {
 	struct editor_tab *tab = editor_tab(editor);
@@ -895,6 +999,7 @@ static void ask_paste(struct editor *editor, bool primary)
 	if (!tab || tab->loading || editor->paste_tab)
 		return;
 	editor->paste_tab = tab;
+	editor->paste_query = editor->searching;
 	editor->paste_version = tab->document.version;
 	editor->paste_anchor = tab->document.view.anchor;
 	editor->paste_caret = tab->document.view.caret;
@@ -902,23 +1007,26 @@ static void ask_paste(struct editor *editor, bool primary)
 		editor->paste_tab = nullptr;
 }
 
-/* Returns whether there is a selection and it was copied */
+/* Returns whether the document that keys edit has a selection and it was copied */
 static bool copy(struct editor *editor, bool primary)
 {
-	struct editor_tab *tab = editor_tab(editor);
+	const struct document *document = focus(editor);
 	size_t start, end;
 
-	if (!tab || tab->loading || !view_selection(&tab->document.view, &start, &end))
+	if (!document || !view_selection(&document->view, &start, &end))
 		return false;
 	return editor->listener->copy(editor, primary, end - start,
-				      arrview(start, end - start, array_ptr(tab->document.text.bytes, tab->document.text.size)));
+				      arrview(start, end - start, array_ptr(document->text.bytes, document->text.size)));
 }
 
-/* The gutter grows with the lines */
+static void requery(struct editor *editor);
+
+/* The gutter grows with the lines, and a query that changed is looked for again */
 static void update(struct editor *editor, bool done)
 {
 	if (!done)
 		return;
+	requery(editor);
 	if (indexing_tab(editor))
 		poor_loop_timer_arm(editor->loop, &editor->indexing, 0);
 	editor_layout(editor);
@@ -978,6 +1086,7 @@ static void interrupt(struct editor *editor)
 		tab->close_saved = false;
 	if (editor->status[0]) {
 		editor->status[0] = 0;
+		poor_loop_timer_disarm(&editor->prompting);
 		changed(editor);
 	}
 }
@@ -1069,6 +1178,7 @@ static void browse(struct editor *editor)
 {
 	struct editor_tab *tab = editor_tab(editor);
 
+	stop_searching(editor);
 	editor->browsing = editor->show_tree = true;
 	editor_layout(editor);
 	if (tab && tree_nearest(&editor->tree, tab->path))
@@ -1133,10 +1243,186 @@ static bool tree_key(struct editor *editor, xkb_keysym_t sym, size_t size, const
 	return false;
 }
 
-/* Commands with Control, which don't repeat unless they edit */
+/* Matches are counted in slices between loop passes, so that a big document doesn't stop the editor */
+static void count_matches(struct editor *editor)
+{
+	editor->search_counted = editor->search_count = editor->search_index = 0;
+	poor_loop_timer_arm(editor->loop, &editor->counting, 0);
+}
+
+static void on_count(struct poor_loop *loop, struct poor_loop_timer *timer)
+{
+	struct editor *editor = container_of(timer, struct editor, counting);
+	const struct text *text = &editor->search_tab->document.text;
+	size_t from = editor->search_counted;
+	size_t end = text->size - from > EDITOR_COUNT_BYTES ? from + EDITOR_COUNT_BYTES : text->size;
+
+	editor->search_count += search_count(&editor->search, text, from, end, editor->search_match, &editor->search_index);
+	editor->search_counted = end;
+	if (end < text->size)
+		poor_loop_timer_arm(loop, timer, 0);
+	else
+		changed(editor);
+}
+
+/* A match that didn't show goes to the upper third, like after a jump */
+static void show_match(struct editor_tab *tab, size_t match, size_t size)
+{
+	struct view *view = &tab->document.view;
+	size_t top = view->top, line = text_line_of(&tab->document.text, match), rows = view_rows(view);
+
+	document_select(&tab->document, match, match + size);
+	if (view->top != top)
+		view->top = line > rows / 3 ? line - rows / 3 : 0;
+	view_reveal(view, match);
+}
+
+/* The first match after the start of the selection, or the last one before it, around the ends of the document */
+static size_t next_match(const struct search *search, const struct document *document, bool back)
+{
+	const struct text *text = &document->text;
+	size_t start, end, from, match;
+
+	view_selection(&document->view, &start, &end);
+	if (back) {
+		match = search_backward(search, text, 0, start);
+		return match != SIZE_MAX ? match : search_backward(search, text, start, text->size);
+	}
+	from = start + (start != end);
+	match = search_forward(search, text, from, text->size);
+	return match != SIZE_MAX ? match : search_forward(search, text, 0, from);
+}
+
+static void find(struct editor *editor)
+{
+	struct editor_tab *tab = editor->search_tab;
+	const struct text *text = &tab->document.text;
+	size_t match = search_forward(&editor->search, text, editor->search_origin, text->size);
+
+	if (match == SIZE_MAX)
+		match = search_forward(&editor->search, text, 0, editor->search_origin);
+	editor->search_match = match;
+	if (match == SIZE_MAX)
+		document_place(&tab->document, editor->search_origin, false);
+	else
+		show_match(tab, match, editor->search.size);
+	count_matches(editor);
+	changed(editor);
+}
+
+/* Counted matches come in their order, the next one is after the selected one */
+static void step(struct editor *editor, bool back)
+{
+	struct editor_tab *tab = editor->search_tab;
+	size_t match = next_match(&editor->search, &tab->document, back), *index = &editor->search_index;
+	bool counted = editor->search_match != SIZE_MAX && editor->search_counted == tab->document.text.size;
+
+	if (match == SIZE_MAX)
+		return;
+	editor->search_match = editor->search_origin = match;
+	show_match(tab, match, editor->search.size);
+	if (!counted)
+		count_matches(editor);
+	else if (back)
+		*index = *index > 1 ? *index - 1 : editor->search_count;
+	else
+		*index = *index < editor->search_count ? *index + 1 : 1;
+	changed(editor);
+}
+
+static const struct {
+	xkb_keysym_t sym;
+	enum document_motion motion;
+} MOTIONS[] = {
+	{ XKB_KEY_Left, DOCUMENT_LEFT }, { XKB_KEY_Right, DOCUMENT_RIGHT }, { XKB_KEY_Up, DOCUMENT_UP },
+	{ XKB_KEY_Down, DOCUMENT_DOWN }, { XKB_KEY_Page_Up, DOCUMENT_PAGE_UP }, { XKB_KEY_Page_Down, DOCUMENT_PAGE_DOWN },
+	{ XKB_KEY_Home, DOCUMENT_HOME }, { XKB_KEY_End, DOCUMENT_END },
+};
+
+static bool motion_of(xkb_keysym_t sym, enum document_motion *motion)
+{
+	foreach_array_const_ref(MOTIONS, entry) {
+		if (entry->sym == sym) {
+			*motion = entry->motion;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void compile(struct editor *editor)
+{
+	const struct text *text = &editor->query.text;
+
+	search_init(&editor->search);
+	search_add(&editor->search, arrview_first(text->size, array_ptr(text->bytes, text->capacity)));
+	editor->query_version = editor->query.version;
+}
+
+static void requery(struct editor *editor)
+{
+	if (!editor->searching || editor->query.version == editor->query_version)
+		return;
+	compile(editor);
+	find(editor);
+}
+
+static bool query_insert(struct editor *editor, size_t size, const char (*bytes)[size])
+{
+	struct document *query = &editor->query;
+	size_t start, end, fit;
+
+	view_selection(&query->view, &start, &end);
+	fit = search_fit_impl(size, bytes, query->text.capacity - query->text.size + end - start);
+	return (fit || start != end) && document_insert(query, arrview_first(fit, bytes), false);
+}
+
+static void search_start(struct editor *editor, struct editor_tab *tab)
+{
+	const struct text *text = &tab->document.text;
+	size_t start, end;
+
+	document_select_all(&editor->query);
+	if (editor->searching) {
+		changed(editor);
+		return;
+	}
+	editor->browsing = false;
+	editor->drag = EDITOR_IDLE;
+	editor->searching = true;
+	editor->search_tab = tab;
+	view_selection(&tab->document.view, &start, &end);
+	if (start != end && text_line_of(text, start) == text_line_of(text, end)) {
+		query_insert(editor, end - start, arrview(start, end - start, array_ptr(text->bytes, text->size)));
+		document_select_all(&editor->query);
+		compile(editor);
+	}
+	editor->search_origin = start;
+	editor->search_match = end - start == editor->search.size && search_at(&editor->search, text, start) ? start : SIZE_MAX;
+	count_matches(editor);
+	changed(editor);
+}
+
+static void search_again(struct editor *editor, struct editor_tab *tab, bool back)
+{
+	size_t match;
+
+	if (!editor->search.size) {
+		status(editor, "Nothing to find");
+		return;
+	}
+	if ((match = next_match(&editor->search, &tab->document, back)) == SIZE_MAX) {
+		status(editor, "\"%.*s\" isn't in %s", (int)editor->search.size, editor->search.query, path_name(tab->path));
+		return;
+	}
+	show_match(tab, match, editor->search.size);
+	changed(editor);
+}
+
+/* Commands with Control, which don't repeat unless they edit. The document scrolls while the query is edited. */
 static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysym_t sym, bool shift, enum editor_confirm confirm)
 {
-	struct document *document = tab && !tab->loading && !editor_browsing(editor) ? &tab->document : nullptr;
+	struct document *document = editor_browsing(editor) ? nullptr : focus(editor);
 
 	switch (sym) {
 	case XKB_KEY_q:
@@ -1168,13 +1454,18 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 		if (tab)
 			close_tab(editor, tab, confirm);
 		return false;
+	case XKB_KEY_f:
+		if (tab && !tab->loading)
+			search_start(editor, tab);
+		return false;
 	}
 	if (!document)
 		return false;
 	switch (sym) {
 	case XKB_KEY_Return:
 	case XKB_KEY_KP_Enter:
-		locate(editor, shift);
+		if (!editor->searching)
+			locate(editor, shift);
 		return false;
 	case XKB_KEY_z:
 		update(editor, shift ? document_redo(document) : document_undo(document));
@@ -1213,7 +1504,7 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 		return false;
 	case XKB_KEY_Up:
 	case XKB_KEY_Down:
-		update(editor, view_scroll(&document->view, sym == XKB_KEY_Up ? -1 : 1, 0));
+		update(editor, view_scroll(&tab->document.view, sym == XKB_KEY_Up ? -1 : 1, 0));
 		return true;
 	case XKB_KEY_BackSpace:
 	case XKB_KEY_Delete:
@@ -1225,18 +1516,11 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 
 bool editor_key(struct editor *editor, xkb_keysym_t sym, uint32_t modifiers, size_t size, const char (*text)[size])
 {
-	static const struct {
-		xkb_keysym_t sym;
-		enum document_motion motion;
-	} motions[] = {
-		{ XKB_KEY_Left, DOCUMENT_LEFT }, { XKB_KEY_Right, DOCUMENT_RIGHT }, { XKB_KEY_Up, DOCUMENT_UP },
-		{ XKB_KEY_Down, DOCUMENT_DOWN }, { XKB_KEY_Page_Up, DOCUMENT_PAGE_UP }, { XKB_KEY_Page_Down, DOCUMENT_PAGE_DOWN },
-		{ XKB_KEY_Home, DOCUMENT_HOME }, { XKB_KEY_End, DOCUMENT_END },
-	};
 	struct editor_tab *tab = editor_tab(editor);
-	struct document *document = tab && !tab->loading ? &tab->document : nullptr;
+	struct document *document = focus(editor);
 	bool shift = modifiers & SEAT_SHIFT;
 	enum editor_confirm confirm = editor->confirm;
+	enum document_motion motion;
 
 	if (modifier(sym))
 		return false;
@@ -1252,12 +1536,25 @@ bool editor_key(struct editor *editor, xkb_keysym_t sym, uint32_t modifiers, siz
 	}
 	if (editor_browsing(editor))
 		return tree_key(editor, sym, size, text);
+	if (editor->searching) {
+		switch (sym) {
+		case XKB_KEY_Escape:
+			stop_searching(editor);
+			return false;
+		case XKB_KEY_Return:
+		case XKB_KEY_KP_Enter:
+		case XKB_KEY_F3:
+			step(editor, shift);
+			return true;
+		case XKB_KEY_Tab:
+		case XKB_KEY_ISO_Left_Tab:
+			return false;
+		}
+	}
 	if (!document)
 		return false;
-	foreach_array_const_ref(motions, entry) {
-		if (entry->sym != sym)
-			continue;
-		update(editor, document_move(document, entry->motion, shift));
+	if (motion_of(sym, &motion)) {
+		update(editor, document_move(document, motion, shift));
 		if (shift)
 			copy(editor, true);
 		return true;
@@ -1282,12 +1579,15 @@ bool editor_key(struct editor *editor, xkb_keysym_t sym, uint32_t modifiers, siz
 		if (shift)
 			ask_paste(editor, false);
 		return false;
+	case XKB_KEY_F3:
+		search_again(editor, tab, shift);
+		return true;
 	}
 	if (!printable(size, text))
 		return false;
 	if (document_insert(document, text, true))
 		update(editor, true);
-	else if (!document->read_only)
+	else if (!document->read_only && !editor->searching)
 		status(editor, "No room in %s", path_name(tab->path));
 	return true;
 }
@@ -1341,18 +1641,17 @@ static void tabs_click(struct editor *editor, double x, uint32_t button, enum ed
 	}
 }
 
-/* Two clicks in a row select a word, three a line */
-static void text_click(struct editor *editor, double x, double y, uint32_t button, uint32_t time, uint32_t modifiers)
+/* Two clicks in a row select a word, three a line, of the document that keys edit, which shows in 'rect' */
+static void click(struct editor *editor, const struct editor_rect *rect, double x, double y, uint32_t button, uint32_t time,
+		  uint32_t modifiers)
 {
-	struct editor_tab *tab = editor_tab(editor);
-	struct document *document;
+	struct document *document = focus(editor);
 	size_t offset;
 	bool near;
 
-	if (!tab || tab->loading)
+	if (!document)
 		return;
-	document = &tab->document;
-	offset = view_hit(&document->view, x - editor->text_rect.x, y - editor->text_rect.y);
+	offset = view_hit(&document->view, x - rect->x, y - rect->y);
 	if (button == BTN_MIDDLE) {
 		update(editor, document_place(document, offset, false));
 		ask_paste(editor, true);
@@ -1360,14 +1659,14 @@ static void text_click(struct editor *editor, double x, double y, uint32_t butto
 	}
 	if (button != BTN_LEFT)
 		return;
-	near = tab == editor->click_tab && fabs(x - editor->click_x) <= editor->cell_width / 2.0 &&
+	near = document == editor->click_document && fabs(x - editor->click_x) <= editor->cell_width / 2.0 &&
 	       fabs(y - editor->click_y) <= editor->cell_width / 2.0;
 	editor->clicks = near && time - editor->click_time < EDITOR_CLICK_MS ? editor->clicks % 3 + 1 : 1;
 	editor->click_time = time;
-	editor->click_tab = tab;
+	editor->click_document = document;
 	editor->click_x = x;
 	editor->click_y = y;
-	if (modifiers & SEAT_CONTROL) {
+	if ((modifiers & SEAT_CONTROL) && !editor->searching) {
 		update(editor, document_place(document, offset, false));
 		locate(editor, modifiers & SEAT_SHIFT);
 		return;
@@ -1392,6 +1691,8 @@ void editor_button(struct editor *editor, double x, double y, uint32_t button, b
 		return;
 	}
 	interrupt(editor);
+	if (!inside(&editor->status_rect, x, y))
+		stop_searching(editor);
 	if (button == BTN_SIDE || button == BTN_BACK) {
 		jump_back(editor);
 	} else if (button == BTN_EXTRA || button == BTN_FORWARD) {
@@ -1406,17 +1707,20 @@ void editor_button(struct editor *editor, double x, double y, uint32_t button, b
 		tabs_click(editor, x, button, confirm);
 	} else if (inside(&editor->gutter_rect, x, y) || inside(&editor->text_rect, x, y)) {
 		stop_browsing(editor);
-		text_click(editor, x, y, button, time, modifiers);
+		click(editor, &editor->text_rect, x, y, button, time, modifiers);
+	} else if (editor->searching && inside(&editor->query_rect, x, y)) {
+		click(editor, &editor->query_rect, x, y, button, time, modifiers);
 	}
 }
 
 void editor_motion(struct editor *editor, double x, double y)
 {
-	struct editor_tab *tab = editor_tab(editor);
+	struct document *document = focus(editor);
+	const struct editor_rect *rect = editor->searching ? &editor->query_rect : &editor->text_rect;
 	size_t columns;
 
-	if (editor->drag == EDITOR_SELECTING && tab && !tab->loading) {
-		update(editor, view_drag(&tab->document.view, x - editor->text_rect.x, y - editor->text_rect.y));
+	if (editor->drag == EDITOR_SELECTING && document) {
+		update(editor, view_drag(&document->view, x - rect->x, y - rect->y));
 	} else if (editor->drag == EDITOR_RESIZING) {
 		columns = tree_columns(editor, x > 2 * editor->padding ? (x - 2 * editor->padding) / editor->cell_width : 0);
 		if (columns != editor->tree_columns) {
@@ -1426,7 +1730,8 @@ void editor_motion(struct editor *editor, double x, double y)
 	}
 	if (editor->drag == EDITOR_RESIZING || (editor->drag == EDITOR_IDLE && on_splitter(editor, x, y)))
 		editor->listener->cursor(editor, POOR_WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE);
-	else if (editor->drag == EDITOR_SELECTING || inside(&editor->text_rect, x, y) || inside(&editor->gutter_rect, x, y))
+	else if (editor->drag == EDITOR_SELECTING || inside(&editor->text_rect, x, y) || inside(&editor->gutter_rect, x, y) ||
+		 (editor->searching && inside(&editor->query_rect, x, y)))
 		editor->listener->cursor(editor, POOR_WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT);
 	else
 		editor->listener->cursor(editor, POOR_WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
@@ -1468,22 +1773,36 @@ void editor_paste_impl(struct editor *editor, size_t size, const char (*bytes)[s
 {
 	struct editor_tab *tab = editor->paste_tab;
 	struct document *document;
+	size_t anchor, caret;
 
 	editor->paste_tab = nullptr;
 	if (!tab || !size)
 		return;
+	if (editor->paste_query) {
+		if (editor->searching && editor->search_tab == tab) {
+			interrupt(editor);
+			update(editor, query_insert(editor, size, bytes));
+		}
+		return;
+	}
 	document = &tab->document;
 	if (document->version != editor->paste_version) {
 		status(editor, "Nothing is pasted, %s changed meanwhile", path_name(tab->path));
 		return;
 	}
+	anchor = document->view.anchor;
+	caret = document->view.caret;
 	view_select(&document->view, editor->paste_anchor, editor->paste_caret);
 	if (document_insert_impl(document, size, bytes, false)) {
 		interrupt(editor);
+		if (tab == editor->search_tab)
+			stop_searching(editor);
 		update(editor, true);
-	} else if (!document->read_only) {
-		status(editor, "No room for %zu bytes in %s", size, path_name(tab->path));
+		return;
 	}
+	view_select(&document->view, anchor, caret);
+	if (!document->read_only)
+		status(editor, "No room for %zu bytes in %s", size, path_name(tab->path));
 }
 
 void editor_resize(struct editor *editor, int32_t width, int32_t height, int32_t cell_width, int32_t cell_height,
@@ -1524,7 +1843,7 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	editor->line = 1;
 	editor->scale = 120;
 	editor->click_time = editor->clicks = 0;
-	editor->click_tab = nullptr;
+	editor->click_document = nullptr;
 	editor->tree_columns = EDITOR_TREE_COLUMNS;
 	editor->drag = EDITOR_IDLE;
 	editor->confirm = EDITOR_NOTHING;
@@ -1538,6 +1857,15 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 		tab->used = false;
 	poor_loop_timer_init(&editor->highlight, on_highlight);
 	poor_loop_timer_init(&editor->indexing, on_index);
+	poor_loop_timer_init(&editor->counting, on_count);
+	poor_loop_timer_init(&editor->prompting, on_prompt);
+	document_init(&editor->query, memory->query.bytes, memory->query.lines, memory->query.states, memory->query.edits,
+		      memory->query.history);
+	editor->query.literal = true;
+	editor->query_version = editor->query.version;
+	search_init(&editor->search);
+	editor->search_tab = nullptr;
+	editor->searching = editor->paste_query = false;
 	editor->highlight_tab = nullptr;
 	lsp_init(&editor->lsp, loop, &lsp_listener, &memory->lsp);
 	editor_layout(editor);
@@ -1562,6 +1890,7 @@ void editor_stop(struct editor *editor)
 		tree_stop(&editor->tree);
 	poor_loop_timer_disarm(&editor->highlight);
 	poor_loop_timer_disarm(&editor->indexing);
+	stop_searching(editor);
 	editor->request = 0;
 	lsp_stop(&editor->lsp);
 	foreach_array_ref(editor->tabs, tab) {

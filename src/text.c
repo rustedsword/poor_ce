@@ -433,6 +433,24 @@ size_t text_boundary(const struct text *text, size_t offset)
 	return boundary;
 }
 
+/* Without walking the line: a lead byte never continues a character, so only one of the three before can cover 'offset' */
+bool text_is_boundary(const struct text *text, size_t offset)
+{
+	auto all = array_ptr(text->bytes, text->size);
+	size_t length;
+
+	if (!offset || offset >= text->size || (*all)[offset - 1] == '\n')
+		return true;
+	if ((*all)[offset] == '\n' && (*all)[offset - 1] == '\r')
+		return false;
+	for (size_t back = 1; back <= 3 && back <= offset; back++) {
+		utf8_decode(arrview_cfront(offset - back, all), &length);
+		if (length > back)
+			return false;
+	}
+	return !combining(utf8_decode(arrview_cfront(offset, all), &length));
+}
+
 void text_chars_init(const struct text *text, size_t line, struct text_char *c)
 {
 	c->next = text->lines[line];

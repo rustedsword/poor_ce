@@ -76,6 +76,7 @@ size_t text_next(const struct text *text, size_t offset);
 size_t text_prev(const struct text *text, size_t offset);
 /* The character boundary at 'offset', or the one before it */
 size_t text_boundary(const struct text *text, size_t offset);
+bool text_is_boundary(const struct text *text, size_t offset);
 
 void text_chars_init(const struct text *text, size_t line, struct text_char *c);
 bool text_chars_next(const struct text *text, struct text_char *c);

@@ -8,6 +8,7 @@
 
 #include "document.h"
 #include "lsp.h"
+#include "search.h"
 #include "tree.h"
 
 constexpr size_t EDITOR_TABS = 16;
@@ -20,7 +21,13 @@ constexpr size_t EDITOR_TREE_MIN = 8;
 constexpr uint32_t EDITOR_CLICK_MS = 400;
 constexpr size_t EDITOR_TOKENS = 1 << 17;
 constexpr uint64_t EDITOR_HIGHLIGHT_NS = 250'000'000;
+constexpr uint64_t EDITOR_PROMPT_NS = 2'000'000'000;
+constexpr size_t EDITOR_QUERY_EDITS = 256;
+constexpr size_t EDITOR_QUERY_HISTORY = 16 << 10;
+constexpr size_t EDITOR_DETAILS = 256;
+constexpr char EDITOR_PROMPT[] = "Find: ";
 constexpr size_t EDITOR_INDEX_BYTES = 256 << 10;
+constexpr size_t EDITOR_COUNT_BYTES = 1 << 20;
 
 poor_loop_fd_declare(editor_file);
 
@@ -69,7 +76,10 @@ struct editor_jump {
 	char path[PATH_MAX];
 };
 
-/* The memory of the documents of the tabs, of the copy that is saved, of the jumps, the tree and the server */
+/*
+ * The memory of the documents of the tabs, of the query, of the copy that is saved, of the jumps, the tree and the
+ * server. The query is one line.
+ */
 struct editor_memory {
 	struct {
 		char bytes[EDITOR_BYTES];
@@ -79,6 +89,13 @@ struct editor_memory {
 		char history[HISTORY_BYTES];
 		struct editor_token tokens[EDITOR_TOKENS];
 	} documents[EDITOR_TABS];
+	struct {
+		char bytes[SEARCH_BYTES];
+		uint32_t lines[1];
+		uint8_t states[1];
+		struct history_edit edits[EDITOR_QUERY_EDITS];
+		char history[EDITOR_QUERY_HISTORY];
+	} query;
 	char save[EDITOR_BYTES];
 	struct editor_jump jumps[EDITOR_JUMPS];
 	struct tree_memory tree;
@@ -119,8 +136,10 @@ struct editor_listener {
  * The regions of the window are in buffer pixels, 'line' is how thick lines are. The jumps before 'jump_at' go back,
  * the others forward. A paste goes to the selection of 'paste_tab' that it was asked for, if the document stays as it
  * was. The editor quits once the files that are saved are, if 'quitting'. A close that waits for its confirmation is
- * of 'confirm_tab'. Clicks in a row near the last one, at 'click_x', 'click_y' of 'click_tab', select words and lines.
- * The answer to 'request' goes somewhere if 'request_tab' stays active, at 'request_version' and 'request_caret'.
+ * of 'confirm_tab'. Clicks in a row near the last one, at 'click_x', 'click_y' of 'click_document', select words and
+ * lines. The answer to 'request' goes somewhere if 'request_tab' stays active, at 'request_version' and 'request_caret'.
+ * While 'searching', keys edit the 'query' in 'query_rect', whose match in 'search_tab' is selected. The search has the
+ * query of 'query_version'. Matches are counted up to 'search_counted', 'search_index' of them up to 'search_match'.
  */
 struct editor {
 	struct poor_loop *loop;
@@ -128,22 +147,26 @@ struct editor {
 	struct editor_memory *memory;
 	struct tree tree;
 	struct lsp lsp;
+	struct document query;
+	struct search search;
 	struct editor_tab *order[EDITOR_TABS];
-	struct editor_tab *saving;
-	struct poor_loop_timer highlight, indexing;
+	struct editor_tab *saving, *search_tab;
+	struct poor_loop_timer highlight, indexing, counting, prompting;
+	size_t search_origin, search_match, search_counted, search_count, search_index;
 	size_t tab_count, active, tab_first;
 	size_t jump_count, jump_at;
-	uint64_t request, request_version, paste_version, highlight_version;
-	struct editor_tab *request_tab, *paste_tab, *confirm_tab, *click_tab, *highlight_tab;
+	uint64_t request, request_version, paste_version, highlight_version, query_version;
+	struct editor_tab *request_tab, *paste_tab, *confirm_tab, *highlight_tab;
+	const struct document *click_document;
 	size_t request_caret, paste_anchor, paste_caret;
-	struct editor_rect tree_rect, tabs_rect, gutter_rect, text_rect, status_rect;
+	struct editor_rect tree_rect, tabs_rect, gutter_rect, text_rect, status_rect, query_rect;
 	int32_t width, height, cell_width, cell_height, padding, line;
 	uint32_t scale, click_time, clicks;
 	double click_x, click_y;
 	size_t tree_columns;
 	enum editor_drag drag;
 	enum editor_confirm confirm;
-	bool started, focused, show_tree, browsing, quitting;
+	bool started, focused, show_tree, browsing, quitting, searching, paste_query;
 	char root[PATH_MAX];
 	char status[EDITOR_STATUS];
 	char title[PATH_MAX];
@@ -165,6 +188,9 @@ struct editor_tab *editor_tab(const struct editor *editor);
 bool editor_browsing(const struct editor *editor);
 /* The row that keys move in the tree, TREE_NONE without rows */
 uint32_t editor_tree_cursor(const struct editor *editor);
+/* What the status bar shows on the right: the matches, where the caret is and the server. Returns its cells. */
+size_t editor_details_impl(const struct editor *editor, size_t size, char (*out)[size]);
+#define editor_details(editor, out) editor_details_impl(editor, ARRAY_SIZE(out), &auto_arr(out))
 /* Where a tab of 'order' shows in the tab bar, false if it doesn't */
 bool editor_tab_extent(const struct editor *editor, size_t index, int32_t *start, int32_t *end);
 /* Returns whether the key repeats */

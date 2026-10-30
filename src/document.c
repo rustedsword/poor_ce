@@ -61,7 +61,7 @@ void document_init_impl(struct document *document, size_t capacity, char (*bytes
 	document->indent = 0;
 	document->version = 0;
 	document->streak = DOCUMENT_NONE;
-	document->crlf = document->code = document->read_only = false;
+	document->crlf = document->code = document->literal = document->read_only = false;
 }
 
 void document_begin(struct document *document, size_t size)
@@ -229,6 +229,11 @@ static bool select_range(struct document *document, size_t anchor, size_t caret)
 	return view_reveal(view, caret) || changed;
 }
 
+bool document_select(struct document *document, size_t anchor, size_t caret)
+{
+	return select_range(document, anchor, caret);
+}
+
 bool document_select_word(struct document *document, size_t offset)
 {
 	const struct text *text = &document->text;
@@ -320,7 +325,7 @@ bool document_insert_impl(struct document *document, size_t size, const char (*b
 	bool joined = typed && !selected && document->streak == DOCUMENT_TYPING &&
 		      !(size && blank((*bytes)[0]) && start && !blank((*all)[start - 1]));
 
-	if (typed && !selected && size == 1 && (*bytes)[0] == '}' && blank_prefix(text, start)) {
+	if (typed && !document->literal && !selected && size == 1 && (*bytes)[0] == '}' && blank_prefix(text, start)) {
 		start -= level_before(document, start);
 		joined = false;
 	}

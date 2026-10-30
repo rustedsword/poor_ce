@@ -9,6 +9,7 @@
 #include "document.h"
 #include "json.h"
 #include "path.h"
+#include "search.h"
 #include "syntax.h"
 #include "test-runner.h"
 #include "text.h"
@@ -296,6 +297,102 @@ TEST(text_columns)
 	assert(text_of(&sample, 8, "abc\r\n") && text_boundary(text, 4) == 3 && text_boundary(text, 3) == 3);
 }
 
+TEST(text_tells_boundaries)
+{
+	static struct sample sample;
+	static const char *const contents[] = {
+		"e\xcc\x81x\r\ny", "a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80\n\t|", "\xcc\x81x\r\n\r\nb\r",
+		"\x80\xc3\xc3\xa9\xe2\x82\n\xed\xa0\x80\xf0\x9f\x98",
+	};
+	const struct text *text = &sample.text;
+
+	foreach_array_const_ref(contents, each) {
+		assert(text_of(&sample, 8, *each));
+		for (size_t offset = 0; offset <= text->size; offset++)
+			assert(text_is_boundary(text, offset) == (text_boundary(text, offset) == offset));
+	}
+}
+
+static void query(struct search *search, const char *bytes)
+{
+	search_init(search);
+	search_add(search, array_ptr(bytes, strlen(bytes)));
+}
+
+/* ASCII letters fold unless the query has an ASCII capital. Matches may overlap, but don't cut characters. */
+TEST(search_matches)
+{
+	static struct sample sample;
+	const struct text *text = &sample.text;
+	struct search search;
+	size_t upto = 0;
+
+	assert(text_of(&sample, 8, "Foo foo\r\nfOo e\xcc\x81 e aaa"));
+	query(&search, "foo");
+	assert(!search.exact && search_forward(&search, text, 0, text->size) == 0);
+	assert(search_count(&search, text, 0, text->size, 4, &upto) == 3 && upto == 2);
+	assert(search_forward(&search, text, 1, text->size) == 4 && search_forward(&search, text, 5, text->size) == 9);
+	assert(search_forward(&search, text, 10, text->size) == SIZE_MAX && search_forward(&search, text, 0, 4) == 0);
+	assert(search_backward(&search, text, 0, text->size) == 9 && search_backward(&search, text, 0, 9) == 4);
+	assert(search_backward(&search, text, 1, 4) == SIZE_MAX && search_backward(&search, text, 0, 0) == SIZE_MAX);
+	query(&search, "Foo");
+	assert(search.exact && search_forward(&search, text, 0, text->size) == 0);
+	assert(search_forward(&search, text, 1, text->size) == SIZE_MAX && search_backward(&search, text, 0, text->size) == 0);
+	query(&search, "e");
+	assert(!search_at(&search, text, 13) && search_forward(&search, text, 0, text->size) == 17);
+	query(&search, "\xcc\x81");
+	assert(search_forward(&search, text, 0, text->size) == SIZE_MAX);
+	query(&search, "aa");
+	assert(search_forward(&search, text, 0, text->size) == 19 && search_forward(&search, text, 20, text->size) == 20);
+	assert(search_backward(&search, text, 0, text->size) == 20 && !search_at(&search, text, 21));
+	query(&search, "o f");
+	assert(search_forward(&search, text, 0, text->size) == 2 && search_backward(&search, text, 0, text->size) == 2);
+	query(&search, "");
+	assert(search_forward(&search, text, 0, text->size) == SIZE_MAX && !search_at(&search, text, 0));
+}
+
+/* A case of the first byte that isn't there is looked for once, not once for each match */
+TEST(search_counts)
+{
+	static struct {
+		struct text text;
+		char bytes[2 << 20];
+		uint32_t lines[1];
+		uint8_t states[1];
+	} big;
+	struct search search;
+	size_t upto;
+	bool fits;
+
+	test_set_timeout(10);
+	text_init(&big.text, big.bytes, big.lines, big.states);
+	query(&search, "x");
+	foreach_array_const_ref(((const char[]){ 'x', 'X' }), c) {
+		memset(big.bytes, *c, sizeof(big.bytes));
+		text_begin(&big.text, sizeof(big.bytes));
+		assert(text_index(&big.text, SIZE_MAX, &fits) && fits);
+		upto = 0;
+		assert(search_count(&search, &big.text, 0, big.text.size, 1000, &upto) == big.text.size && upto == 1001);
+	}
+}
+
+/* A query takes the whole characters of the first line that fit */
+TEST(search_queries)
+{
+	static char long_line[SEARCH_BYTES + 1];
+	struct search search;
+
+	query(&search, "ab\r\ncd");
+	assert(search.size == 2 && !memcmp(search.query, "ab", 2) && !search.exact);
+	search_add(&search, arrview_str("C\xc3\xa9\x80"));
+	assert(search.size == 6 && search.exact && !memcmp(search.query, "abC\xc3\xa9\x80", 6));
+	memset(long_line, 'x', sizeof(long_line));
+	search_add(&search, long_line);
+	assert(search.size == SEARCH_BYTES);
+	assert(search_fit(arrview_str("a\xc3\xa9\n"), 3) == 3 && search_fit(arrview_str("a\xc3\xa9"), 2) == 1);
+	assert(search_fit(arrview_str("\rab"), 3) == 0 && search_fit(arrview_str("\tb"), 3) == 2);
+}
+
 static const char numbered[] = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n"
 			       "a long line of fourty characters at most\n21";
 
@@ -488,6 +585,8 @@ TEST(document_lines)
 	assert(text_is(&document->text, "\tif (x) {\n\t\t") && caret_at(document, 12, 12));
 	assert(type(document, "}") && text_is(&document->text, "\tif (x) {\n\t}"));
 	assert(document_undo(document) && text_is(&document->text, "\tif (x) {\n\t\t"));
+	document->literal = true;
+	assert(type(document, "}") && text_is(&document->text, "\tif (x) {\n\t\t}"));
 	document_of(&editing, "{}");
 	assert(document_place(document, 1, false) && document_newline(document));
 	assert(text_is(&document->text, "{\n\t\n}") && caret_at(document, 3, 3));

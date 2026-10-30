@@ -16,6 +16,7 @@ static const uint32_t LINE_NUMBER = QUAD_RGB(THEME_LINE_NUMBER);
 static const uint32_t CURRENT_LINE = QUAD_RGB(THEME_CURRENT_LINE);
 static const uint32_t SELECTION = QUAD_RGB(THEME_SELECTION);
 static const uint32_t SELECTION_INACTIVE = QUAD_RGB(THEME_SELECTION_INACTIVE);
+static const uint32_t MATCH = QUAD_RGB(THEME_MATCH);
 static const uint32_t CARET = QUAD_RGB(THEME_CARET);
 static const uint32_t ACCENT = QUAD_RGB(THEME_ACCENT);
 static const uint32_t TREE_ACTIVE = QUAD_RGB(THEME_TREE_ACTIVE);
@@ -90,7 +91,7 @@ static void outline(struct scene *scene, int32_t x, int32_t y, int32_t width, in
 
 static bool typing(const struct editor *editor)
 {
-	return editor->focused && !editor_browsing(editor);
+	return editor->focused && !editor_browsing(editor) && !editor->searching;
 }
 
 static void glyph(struct scene *scene, int32_t x, int32_t y, uint32_t codepoint, uint32_t color)
@@ -214,26 +215,66 @@ static void tabs(struct scene *scene)
 	solid(scene, rect->x, rect->y + rect->height - editor->line, rect->width, editor->line, BORDER);
 }
 
-/* The cells of a selection in a line cover its line break too, if it goes on */
-static void selection(struct scene *scene, const struct document *document, size_t line, int32_t y, size_t start, size_t end)
+static void cells(struct scene *scene, const struct view *view, int32_t y, size_t from, size_t to, uint32_t color)
 {
 	const struct editor *editor = scene->editor;
-	const struct text *text = &document->text;
-	const struct view *view = &document->view;
-	size_t first = text_line_start(text, line), last = text_line_end(text, line), from, to;
 	int32_t x = editor->text_rect.x + view->padding, x0, x1;
 
-	if (end <= first || start > last)
-		return;
-	from = start <= first ? 0 : text_column_of(text, line, start);
-	to = end > last ? text_column_of(text, line, last) + 1 : text_column_of(text, line, end);
 	if (to <= view->left)
 		return;
 	x0 = x + (from > view->left ? from - view->left : 0) * editor->cell_width;
 	x1 = x + (to - view->left) * editor->cell_width;
 	if (x1 > editor->text_rect.x + editor->text_rect.width)
 		x1 = editor->text_rect.x + editor->text_rect.width;
-	solid(scene, x0, y, x1 - x0, editor->cell_height, typing(editor) ? SELECTION : SELECTION_INACTIVE);
+	solid(scene, x0, y, x1 - x0, editor->cell_height, color);
+}
+
+/* The cells of a selection in a line cover its line break too, if it goes on. A match of the search is selected too. */
+static void selection(struct scene *scene, const struct document *document, size_t line, int32_t y, size_t start, size_t end)
+{
+	const struct editor *editor = scene->editor;
+	const struct text *text = &document->text;
+	size_t first = text_line_start(text, line), last = text_line_end(text, line);
+
+	if (end <= first || start > last)
+		return;
+	cells(scene, &document->view, y, start <= first ? 0 : text_column_of(text, line, start),
+	      end > last ? text_column_of(text, line, last) + 1 : text_column_of(text, line, end),
+	      editor->focused && !editor_browsing(editor) ? SELECTION : SELECTION_INACTIVE);
+}
+
+/* Overlapping matches make one band. Left of the view, only matches that start close enough to reach into it count. */
+static void matches(struct scene *scene, const struct document *document, size_t line, int32_t y)
+{
+	const struct search *search = &scene->editor->search;
+	const struct text *text = &document->text;
+	const struct view *view = &document->view;
+	size_t last = view->left + view_columns(view), start = text_line_start(text, line), from = SIZE_MAX, end = 0, edge;
+	struct text_char c;
+	bool more;
+
+	text_chars_init(text, line, &c);
+	while ((more = text_chars_next(text, &c)) && c.column <= view->left)
+		;
+	edge = more ? c.offset : c.end;
+	for (size_t at = edge - start > search->size ? edge - search->size : start; at < edge; at++) {
+		if (search_at(search, text, at)) {
+			from = view->left;
+			end = at + search->size;
+		}
+	}
+	for (; more && c.column < last; more = text_chars_next(text, &c)) {
+		if (search_at(search, text, c.offset)) {
+			if (from == SIZE_MAX)
+				from = c.column;
+			end = c.offset + search->size;
+		} else if (from != SIZE_MAX && c.offset >= end) {
+			cells(scene, view, y, from, c.column, MATCH);
+			from = SIZE_MAX;
+		}
+	}
+	if (from != SIZE_MAX)
+		cells(scene, view, y, from, c.column + c.width, MATCH);
 }
 
 /* The tokens of 'line', from the returned index to 'end'. None if the line was edited since they came. */
@@ -301,6 +342,7 @@ static const struct {
 	{ { "Ctrl+S", "Save" }, { "Ctrl+Q", "Quit" } },
 	{ { "Ctrl+Enter", "Definition" }, { "Ctrl+Shift+Enter", "Declaration" } },
 	{ { "Alt+Left", "Back" }, { "Alt+Right", "Forward" } },
+	{ { "Ctrl+F", "Find" }, { "F3/Shift+F3", "Next/previous match" } },
 	{ { "Ctrl+Z", "Undo" }, { "Ctrl+Shift+Z", "Redo" } },
 	{ { "Ctrl+C", "Copy" }, { "Ctrl+V", "Paste" } },
 	{ { "Ctrl+X", "Cut" }, { "Ctrl+A", "Select all" } },
@@ -388,6 +430,8 @@ static void text(struct scene *scene)
 		if (!selected && line == caret_line)
 			solid(scene, gutter->x, y, gutter->width + rect->width, editor->cell_height, CURRENT_LINE);
 		number(scene, gutter->x + gutter->width - editor->cell_width, y, line + 1, line == caret_line ? TEXT : LINE_NUMBER);
+		if (editor->searching && editor->search.size)
+			matches(scene, document, line, y);
 		if (selected)
 			selection(scene, document, line, y, start, end);
 		characters_of(scene, tab, line, y);
@@ -401,46 +445,52 @@ static void text(struct scene *scene)
 		      typing(editor) ? CARET : DIM);
 }
 
-static const char *server_state(const struct lsp *lsp)
+/* The prompt goes before the query, which shows in its rect like a line of a document in its view */
+static void prompt(struct scene *scene, int32_t x, int32_t y, int32_t end)
 {
-	switch (lsp->state) {
-	case LSP_OFF:
-		return " is off";
-	case LSP_STARTING:
-		return " is starting";
-	case LSP_READY:
-		return "";
-	case LSP_STOPPING:
-		return " is stopping";
-	case LSP_EXITED:
-		return " exited";
+	const struct editor *editor = scene->editor;
+	const struct editor_rect *rect = &editor->query_rect;
+	const struct document *query = &editor->query;
+	const struct text *text = &query->text;
+	const struct view *view = &query->view;
+	int32_t cell = editor->cell_width;
+	size_t columns = view_columns(view), caret = text_column_of(text, 0, view->caret), start, stop;
+	struct text_char c;
+
+	label(scene, x, y, end, EDITOR_PROMPT, DIM);
+	if (view_selection(view, &start, &stop)) {
+		size_t from = text_column_of(text, 0, start), to = text_column_of(text, 0, stop);
+
+		from = from > view->left ? from : view->left;
+		to = to < view->left + columns ? to : view->left + columns;
+		if (from < to)
+			solid(scene, rect->x + (from - view->left) * cell, y, (to - from) * cell, editor->cell_height,
+			      editor->focused ? SELECTION : SELECTION_INACTIVE);
 	}
-	return "";
+	text_chars_init(text, 0, &c);
+	while (text_chars_next(text, &c) && c.column < view->left + columns) {
+		size_t column = c.width || !c.column ? c.column : c.column - 1;
+
+		if (column >= view->left && c.codepoint != ' ')
+			glyph(scene, rect->x + (column - view->left) * cell, y, c.codepoint, TEXT);
+	}
+	if (caret >= view->left && caret - view->left < columns)
+		solid(scene, rect->x + (caret - view->left) * cell, y, 2 * editor->line, editor->cell_height,
+		      editor->focused ? CARET : DIM);
 }
 
-/* What happened or the file of the tab on the left, where the caret is and the server on the right */
+/* What happened, the query or the file of the tab on the left, the matches, where the caret is and the server on the right */
 static void status_bar(struct scene *scene)
 {
 	const struct editor *editor = scene->editor;
 	const struct editor_rect *rect = &editor->status_rect;
 	const struct editor_tab *tab = editor_tab(editor);
 	int32_t y = rect->y + editor->padding, start = rect->x + editor->padding, end = rect->x + rect->width - editor->padding;
-	char left[PATH_MAX + 64], right[256];
-	size_t length = 0;
+	char left[PATH_MAX + 64], right[EDITOR_DETAILS];
 
 	group(scene);
 	solid(scene, rect->x, rect->y, rect->width, rect->height, PANEL);
 	solid(scene, rect->x, rect->y, rect->width, editor->line, BORDER);
-	right[0] = 0;
-	if (tab && !tab->loading) {
-		const struct text *text = &tab->document.text;
-		size_t line = text_line_of(text, tab->document.view.caret);
-
-		length = snprintf_array(right, "Ln %zu, Col %zu", line + 1, text_column_of(text, line, tab->document.view.caret) + 1);
-	}
-	if (editor->lsp.argv && length < ARRAY_SIZE(right))
-		snprintf_array(arrview_cfront(length, right), "%s%s%s", length ? "   " : "", editor->lsp.argv[0],
-			       server_state(&editor->lsp));
 	if (editor->status[0])
 		snprintf_array(left, "%s", editor->status);
 	else if (tab)
@@ -448,11 +498,14 @@ static void status_bar(struct scene *scene)
 			       history_modified(&tab->document.history) ? " [+]" : "", tab->document.read_only ? " [read only]" : "");
 	else
 		snprintf_array(left, "%s", editor->root);
-	end -= characters(right) * editor->cell_width;
+	end -= editor_details(editor, right) * editor->cell_width;
 	group(scene);
 	label(scene, end, y, rect->x + rect->width, right, DIM);
 	group(scene);
-	label(scene, start, y, end - editor->cell_width, left, TEXT);
+	if (editor->searching && !editor->status[0])
+		prompt(scene, start, y, end - editor->cell_width);
+	else
+		label(scene, start, y, end - editor->cell_width, left, TEXT);
 }
 
 static void draw(struct scene *scene)
