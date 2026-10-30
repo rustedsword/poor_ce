@@ -15,6 +15,7 @@
 
 #include "logger.h"
 #include "lsp.h"
+#include "path.h"
 
 constexpr size_t HEADER_BYTES = 32;
 constexpr size_t SMALL_BYTES = 1 << 20;
@@ -565,6 +566,23 @@ static void document(struct json_writer *writer, const char *path)
 {
 	json_printf(writer, "{\"uri\":");
 	uri(writer, path);
+}
+
+const char *lsp_language(const char *path)
+{
+	static const struct {
+		const char *extension, *language;
+	} languages[] = {
+		{ ".c", "c" }, { ".h", "c" }, { ".inc", "c" }, { ".cc", "cpp" }, { ".cpp", "cpp" },
+		{ ".cxx", "cpp" }, { ".hh", "cpp" }, { ".hpp", "cpp" }, { ".hxx", "cpp" },
+	};
+	const char *dot = strrchr(path_name(path), '.');
+
+	if (dot)
+		foreach_array_const_ref(languages, entry)
+			if (!strcmp(dot, entry->extension))
+				return entry->language;
+	return nullptr;
 }
 
 bool lsp_open(struct lsp *lsp, const char *path, const char *language, uint64_t version, const struct text *text)

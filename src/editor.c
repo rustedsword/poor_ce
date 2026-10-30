@@ -2,30 +2,20 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
-#include <fcntl.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
-#include <poor_loop_uring_array.h>
 #include <poor_stdio.h>
 #include <stdarg.h>
 #include <string.h>
-#include <strings.h>
 
 #include "cursor-shape-v1-client-protocol.h"
 #include "editor.h"
-#include "logger.h"
 #include "path.h"
 #include "seat.h"
 
 /* Pixels of the line between the tree and the tabs that drag it, on each side, at scale 1 */
 constexpr int32_t GRIP = 4;
 constexpr size_t GUTTER_DIGITS = 3;
-
-poor_loop_group_attach(editor_file, struct editor_tab, file, read_op, on_read);
-poor_loop_group_attach(editor_file, struct editor_tab, file, write_op, on_write);
-poor_loop_group_attach(editor_file, struct editor_tab, file, sync_op, on_sync);
-poor_loop_group_attach(editor_file, struct editor_tab, file, stat_op, on_stat);
-poor_loop_group_attach(editor_file, struct editor_tab, file, truncate_op, on_truncate);
 
 static void changed(struct editor *editor)
 {
@@ -54,23 +44,6 @@ static void on_prompt(struct poor_loop *, struct poor_loop_timer *timer)
 	changed(editor);
 }
 
-static const char *language(const char *path)
-{
-	static const struct {
-		const char *extension, *language;
-	} languages[] = {
-		{ ".c", "c" }, { ".h", "c" }, { ".inc", "c" }, { ".cc", "cpp" }, { ".cpp", "cpp" },
-		{ ".cxx", "cpp" }, { ".hh", "cpp" }, { ".hpp", "cpp" }, { ".hxx", "cpp" },
-	};
-	const char *dot = strrchr(path_name(path), '.');
-
-	if (dot)
-		foreach_array_const_ref(languages, entry)
-			if (!strcmp(dot, entry->extension))
-				return entry->language;
-	return nullptr;
-}
-
 struct editor_tab *editor_tab(const struct editor *editor)
 {
 	return editor->tab_count ? editor->order[editor->active] : nullptr;
@@ -82,20 +55,13 @@ static struct document *focus(struct editor *editor)
 	struct editor_tab *tab = editor_tab(editor);
 
 	if (editor->searching)
-		return &editor->query;
+		return &editor->find.query;
 	return tab && !tab->loading ? &tab->document : nullptr;
 }
 
 bool editor_browsing(const struct editor *editor)
 {
 	return editor->started && editor->show_tree && (editor->browsing || !editor->tab_count);
-}
-
-uint32_t editor_tree_cursor(const struct editor *editor)
-{
-	uint32_t node = tree_nearest(&editor->tree, editor->tree_cursor);
-
-	return node ? node : tree_next(&editor->tree, 0);
 }
 
 static size_t index_of(const struct editor *editor, const struct editor_tab *tab)
@@ -125,7 +91,7 @@ static void retitle(struct editor *editor)
 /* Returns whether the server has the document as it is, a document that isn't code or is being read it doesn't need */
 static bool lsp_sync(struct editor *editor, struct editor_tab *tab)
 {
-	const char *lang = language(tab->path);
+	const char *lang = lsp_language(tab->path);
 	bool sent;
 
 	if (!lang || tab->loading)
@@ -177,7 +143,7 @@ static void highlight(struct editor *editor)
 	if (!serving(editor))
 		return;
 	foreach_array_const_ref(arrview_first(editor->tab_count, editor->order), tab)
-		unsent |= language((*tab)->path) && !(*tab)->loading && (*tab)->lsp_version != (*tab)->document.version;
+		unsent |= lsp_language((*tab)->path) && !(*tab)->loading && (*tab)->lsp_version != (*tab)->document.version;
 	if (unsent || stale(editor, editor_tab(editor)))
 		poor_loop_timer_arm(editor->loop, &editor->highlight, poor_loop_now() + EDITOR_HIGHLIGHT_NS);
 }
@@ -269,18 +235,17 @@ static const char *server_state(const struct lsp *lsp)
 size_t editor_details_impl(const struct editor *editor, size_t size, char (*out)[size])
 {
 	const struct editor_tab *tab = editor_tab(editor);
+	const struct find *find = &editor->find;
 	size_t length = 0;
 
 	(*out)[0] = 0;
-	if (editor->searching && editor->search.size && editor->search_counted == editor->search_tab->document.text.size) {
-		size_t count = editor->search_count;
-
-		if (!count)
+	if (editor->searching && find->search.size && find_counted(find)) {
+		if (!find->count)
 			length = snprintf_array(out, "No matches");
-		else if (editor->search_match == SIZE_MAX)
-			length = snprintf_array(out, "%zu %s", count, count == 1 ? "match" : "matches");
+		else if (find->match == SIZE_MAX)
+			length = snprintf_array(out, "%zu %s", find->count, find->count == 1 ? "match" : "matches");
 		else
-			length = snprintf_array(out, "%zu of %zu", editor->search_index, count);
+			length = snprintf_array(out, "%zu of %zu", find->index, find->count);
 	}
 	if (tab && !tab->loading) {
 		const struct text *text = &tab->document.text;
@@ -324,10 +289,10 @@ void editor_layout(struct editor *editor)
 		.width = end > query ? (end - query) / editor->cell_width * editor->cell_width : 0,
 		.height = bar,
 	};
-	text_remeasure(&editor->query.text, SIZE_MAX);
-	view_resize(&editor->query.view, editor->query_rect.width, editor->cell_height, editor->cell_width,
+	text_remeasure(&editor->find.query.text, SIZE_MAX);
+	view_resize(&editor->find.query.view, editor->query_rect.width, editor->cell_height, editor->cell_width,
 		    editor->cell_height, 0);
-	view_reveal(&editor->query.view, editor->query.view.caret);
+	view_reveal(&editor->find.query.view, editor->find.query.view.caret);
 	foreach_array_ref(editor->tabs, tab) {
 		if (!tab->used || tab->closing)
 			continue;
@@ -343,6 +308,11 @@ void editor_layout(struct editor *editor)
 		if (editor_tab_extent(editor, editor->active, &start, &end) && end <= editor->tabs_rect.x + editor->tabs_rect.width)
 			break;
 	}
+}
+
+static bool searching_in(const struct editor *editor, const struct editor_tab *tab)
+{
+	return editor->searching && tab && &tab->document == editor->find.target;
 }
 
 static void stop_searching(struct editor *editor)
@@ -363,7 +333,7 @@ static void activate(struct editor *editor, size_t index)
 {
 	editor->active = index;
 	editor->drag = EDITOR_IDLE;
-	if (editor_tab(editor) != editor->search_tab)
+	if (!searching_in(editor, editor_tab(editor)))
 		stop_searching(editor);
 	editor_layout(editor);
 	retitle(editor);
@@ -371,20 +341,20 @@ static void activate(struct editor *editor, size_t index)
 	changed(editor);
 }
 
-static bool tab_busy(const struct editor_tab *tab)
-{
-	return tab->open_op.pending || tab->create_op.pending || tab->file_open || tab->saving;
-}
-
 /* The memory of a closed tab is free once its file is */
 static void tab_release(struct editor_tab *tab)
 {
-	if (tab->closing && !tab_busy(tab))
+	if (tab->closing && !tab->file.busy)
 		tab->used = false;
 }
 
-static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io_uring_cqe *cqe);
-static void on_create(struct poor_loop *, struct poor_loop_op *op, const struct io_uring_cqe *cqe);
+static int file_identified(struct file *file);
+static void file_done(struct file *file, int error);
+
+static const struct file_listener file_listener = {
+	.identified = file_identified,
+	.done = file_done,
+};
 
 static struct editor_tab *tab_new(struct editor *editor, const char *path)
 {
@@ -406,21 +376,14 @@ static struct editor_tab *tab_new(struct editor *editor, const char *path)
 	tab->used = true;
 	tab->editor = editor;
 	document_init(&tab->document, memory->bytes, memory->lines, memory->states, memory->edits, memory->history);
-	tab->document.code = language(path) != nullptr;
-	poor_loop_op_init(&tab->open_op, on_open);
-	poor_loop_op_init(&tab->read_op, on_read);
-	poor_loop_op_init(&tab->create_op, on_create);
-	poor_loop_op_init(&tab->write_op, on_write);
-	poor_loop_op_init(&tab->sync_op, on_sync);
-	poor_loop_op_init(&tab->stat_op, on_stat);
-	poor_loop_op_init(&tab->truncate_op, on_truncate);
+	tab->document.code = lsp_language(path) != nullptr;
+	file_init(&tab->file, editor->loop, &file_listener, tab->path);
 	tab->tokens = &memory->tokens;
 	tab->token_count = 0;
 	tab->jump_offset = SIZE_MAX;
 	tab->digits = GUTTER_DIGITS;
 	tab->lsp_version = tab->tokens_version = 0;
-	tab->loading = tab->saving = tab->queued = tab->closing = tab->file_open = tab->jump = tab->close_saved = false;
-	tab->identified = tab->indexing = false;
+	tab->loading = tab->queued = tab->closing = tab->jump = tab->close_saved = tab->indexing = false;
 	snprintf_array(tab->path, "%s", path);
 	memmove(arrview(index + 1, editor->tab_count - index, editor->order), arrview(index, editor->tab_count - index, editor->order),
 		ARRAY_SIZE_BYTES(arrview(index, editor->tab_count - index, editor->order)));
@@ -451,9 +414,7 @@ static void tab_close(struct editor_tab *tab)
 	if (editor->highlight_tab == tab)
 		editor->highlight_tab = nullptr;
 	tab->indexing = false;
-	foreach_array_ref(((struct poor_loop_op *[]){ &tab->open_op, &tab->read_op }), op)
-		if ((*op)->pending)
-			io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(editor->loop)), *op, 0);
+	file_cancel(&tab->file);
 	tab_release(tab);
 	activate(editor, editor->active);
 }
@@ -476,7 +437,7 @@ static void loaded(struct editor_tab *tab)
 	struct document *document = &tab->document;
 
 	tab->loading = false;
-	if (document->read_only || tab->done == document->text.capacity) {
+	if (document->read_only || tab->file.done == document->text.capacity) {
 		document->read_only = true;
 		status(editor, "%s is too big to edit", path_name(tab->path));
 	}
@@ -528,140 +489,58 @@ static void on_index(struct poor_loop *loop, struct poor_loop_timer *timer)
 
 static void index_file(struct editor_tab *tab)
 {
-	document_begin(&tab->document, tab->done);
+	document_begin(&tab->document, tab->file.done);
 	tab->indexing = true;
 	poor_loop_timer_arm(tab->editor->loop, &tab->editor->indexing, 0);
-}
-
-static void read_next(struct editor_tab *tab)
-{
-	struct text *text = &tab->document.text;
-
-	io_uring_prep_read_array(need_sqe(poor_loop_group_get_sqe_or_submit(tab->editor->loop, &tab->file, &tab->read_op)),
-				 tab->file.fd, arrview_cfront(tab->done, array_ptr(text->bytes, text->capacity)), -1);
-}
-
-POOR_LOOP_GROUP_OP(on_read, loop, file, op, cqe)
-{
-	struct editor_tab *tab = container_of(file, struct editor_tab, file);
-
-	if (tab->closing)
-		return;
-	if (cqe->res < 0) {
-		status(tab->editor, "%s: %s", path_name(tab->path), strerror(-cqe->res));
-		tab_close(tab);
-		return;
-	}
-	tab->done += cqe->res;
-	if (cqe->res && tab->done < tab->document.text.capacity) {
-		read_next(tab);
-		return;
-	}
-	index_file(tab);
-}
-
-static void stat_file(struct editor_tab *tab)
-{
-	io_uring_prep_statx(need_sqe(poor_loop_group_get_sqe_or_submit(tab->editor->loop, &tab->file, &tab->stat_op)),
-			    tab->file.fd, "", AT_EMPTY_PATH, STATX_INO, &tab->statx);
 }
 
 static struct editor_tab *twin(const struct editor *editor, const struct editor_tab *tab)
 {
 	foreach_array_const_ref(arrview_first(editor->tab_count, editor->order), other)
-		if (*other != tab && (*other)->identified && (*other)->inode == tab->inode && (*other)->device == tab->device)
+		if (*other != tab && (*other)->file.identified && (*other)->file.inode == tab->file.inode &&
+		    (*other)->file.device == tab->file.device)
 			return *other;
 	return nullptr;
 }
 
-static void write_next(struct editor_tab *tab);
-
-/*
- * A file that another tab has under another path goes to that tab, with the jump to it if it still shows. A save
- * empties the file only once it is known to be no file of another tab. A refused tab doesn't take the file either.
- */
-POOR_LOOP_GROUP_OP(on_stat, loop, file, op, cqe)
-{
-	struct editor_tab *tab = container_of(file, struct editor_tab, file), *other = nullptr;
-	struct editor *editor = tab->editor;
-	bool shown = editor_tab(editor) == tab;
-
-	if (tab->closing)
-		return;
-	if (!cqe->res) {
-		tab->inode = tab->statx.stx_ino;
-		tab->device = tab->statx.stx_dev_major << 20 | tab->statx.stx_dev_minor;
-		other = twin(editor, tab);
-		tab->identified = !other;
-	}
-	if (!tab->loading && cqe->res) {
-		tab->error = -cqe->res;
-	} else if (!tab->loading && other) {
-		tab->error = EEXIST;
-	} else if (!tab->loading) {
-		io_uring_prep_ftruncate(need_sqe(poor_loop_group_get_sqe_or_submit(editor->loop, &tab->file, &tab->truncate_op)),
-					tab->file.fd, 0);
-	} else if (!other) {
-		read_next(tab);
-	} else {
-		if (shown && other->loading && (tab->jump || tab->jump_offset != SIZE_MAX)) {
-			other->jump = tab->jump;
-			other->jump_offset = tab->jump_offset;
-			other->jump_line = tab->jump_line;
-			other->jump_character = tab->jump_character;
-		} else if (shown && !other->loading && tab->jump) {
-			reveal(other, lsp_offset(&editor->lsp, &other->document.text, tab->jump_line, tab->jump_character));
-		} else if (shown && !other->loading && tab->jump_offset != SIZE_MAX) {
-			reveal(other, tab->jump_offset < other->document.text.size ? tab->jump_offset : other->document.text.size);
-		}
-		tab_close(tab);
-		if (shown)
-			activate(editor, index_of(editor, other));
-	}
-}
-
-POOR_LOOP_GROUP_OP(on_truncate, loop, file, op, cqe)
+/* A tab doesn't read the file of another tab, or save over it */
+static int file_identified(struct file *file)
 {
 	struct editor_tab *tab = container_of(file, struct editor_tab, file);
 
-	if (cqe->res < 0)
-		tab->error = -cqe->res;
-	else
-		write_next(tab);
+	return twin(tab->editor, tab) ? EEXIST : 0;
 }
 
-/* A file that isn't there yet is created when it is saved */
-static void on_open(struct poor_loop *, struct poor_loop_op *op, const struct io_uring_cqe *cqe)
+/* A file that another tab has under another path goes to that tab, with the jump to it if it still shows */
+static void give_way(struct editor_tab *tab)
 {
-	struct editor_tab *tab = container_of(op, struct editor_tab, open_op);
 	struct editor *editor = tab->editor;
+	struct editor_tab *other = twin(editor, tab);
+	bool shown = editor_tab(editor) == tab;
 
-	if (tab->closing) {
-		if (cqe->res >= 0)
-			poor_loop_close_fd_or_submit(editor->loop, cqe->res, IOSQE_ASYNC);
-		tab_release(tab);
-		return;
+	if (shown && other->loading && (tab->jump || tab->jump_offset != SIZE_MAX)) {
+		other->jump = tab->jump;
+		other->jump_offset = tab->jump_offset;
+		other->jump_line = tab->jump_line;
+		other->jump_character = tab->jump_character;
+	} else if (shown && !other->loading && tab->jump) {
+		reveal(other, lsp_offset(&editor->lsp, &other->document.text, tab->jump_line, tab->jump_character));
+	} else if (shown && !other->loading && tab->jump_offset != SIZE_MAX) {
+		reveal(other, tab->jump_offset < other->document.text.size ? tab->jump_offset : other->document.text.size);
 	}
-	if (cqe->res == -ENOENT) {
-		index_file(tab);
-		return;
-	}
-	if (cqe->res < 0) {
-		status(editor, "%s: %s", path_name(tab->path), strerror(-cqe->res));
-		tab_close(tab);
-		return;
-	}
-	poor_loop_fd_init(&tab->file, cqe->res);
-	tab->file_open = true;
-	stat_file(tab);
+	tab_close(tab);
+	if (shown)
+		activate(editor, index_of(editor, other));
 }
 
 static void tab_save(struct editor_tab *tab);
 
 static bool saving(const struct editor *editor)
 {
+	if (editor->saving)
+		return true;
 	foreach_array_const_ref(editor->tabs, tab)
-		if (tab->used && (tab->saving || tab->queued))
+		if (tab->used && tab->queued)
 			return true;
 	return false;
 }
@@ -670,25 +549,24 @@ static bool saving(const struct editor *editor)
  * A failed save keeps its tab, and the editor, open. The server hears about a save after the changes that it saved,
  * with the bytes of the file, which stay until the next save. Without room for that, it doesn't.
  */
-static void saved(struct editor_tab *tab)
+static void saved(struct editor_tab *tab, int error)
 {
 	struct editor *editor = tab->editor;
 
-	tab->saving = false;
 	editor->saving = nullptr;
-	history_saved(&tab->document.history, !tab->error);
-	if (tab->error == EEXIST) {
+	history_saved(&tab->document.history, !error);
+	if (error == EEXIST) {
 		status(editor, "%s isn't saved, another tab has its file", path_name(tab->path));
 		tab->close_saved = editor->quitting = false;
 		editor->confirm = EDITOR_NOTHING;
-	} else if (tab->error) {
-		status(editor, "%s: %s", path_name(tab->path), strerror(tab->error));
+	} else if (error) {
+		status(editor, "%s: %s", path_name(tab->path), strerror(error));
 		tab->close_saved = editor->quitting = false;
 		editor->confirm = EDITOR_NOTHING;
 	} else {
 		status(editor, "%s is saved", path_name(tab->path));
 		if (serving(editor) && tab->lsp_version && !tab->closing && lsp_sync(editor, tab))
-			lsp_save(&editor->lsp, tab->path, arrview_first(tab->size, editor->memory->save));
+			lsp_save(&editor->lsp, tab->path, arrview_first(tab->file.size, editor->memory->save));
 	}
 	if (tab->close_saved && !tab->closing)
 		tab_close(tab);
@@ -702,62 +580,22 @@ static void saved(struct editor_tab *tab)
 		editor->listener->quit(editor);
 }
 
-POOR_LOOP_FD_DONE(editor_file, loop, file)
+static void file_done(struct file *file, int error)
 {
 	struct editor_tab *tab = container_of(file, struct editor_tab, file);
 
-	tab->file_open = false;
-	if (tab->saving)
-		saved(tab);
-	tab_release(tab);
-}
-
-static void write_next(struct editor_tab *tab)
-{
-	struct editor *editor = tab->editor;
-
-	if (tab->done == tab->size) {
-		io_uring_prep_fsync(need_sqe(poor_loop_group_get_sqe_or_submit(editor->loop, &tab->file, &tab->sync_op)),
-				    tab->file.fd, 0);
-		return;
-	}
-	io_uring_prep_write_array(need_sqe(poor_loop_group_get_sqe_or_submit(editor->loop, &tab->file, &tab->write_op)),
-				  tab->file.fd, arrview(tab->done, tab->size - tab->done, editor->memory->save), -1);
-}
-
-POOR_LOOP_GROUP_OP(on_write, loop, file, op, cqe)
-{
-	struct editor_tab *tab = container_of(file, struct editor_tab, file);
-
-	if (cqe->res <= 0) {
-		tab->error = cqe->res ? -cqe->res : EIO;
-		return;
-	}
-	tab->done += cqe->res;
-	write_next(tab);
-}
-
-POOR_LOOP_GROUP_OP(on_sync, loop, file, op, cqe)
-{
-	struct editor_tab *tab = container_of(file, struct editor_tab, file);
-
-	if (cqe->res < 0)
-		tab->error = -cqe->res;
-}
-
-static void on_create(struct poor_loop *, struct poor_loop_op *op, const struct io_uring_cqe *cqe)
-{
-	struct editor_tab *tab = container_of(op, struct editor_tab, create_op);
-
-	if (cqe->res < 0) {
-		tab->error = -cqe->res;
-		saved(tab);
+	if (file->writing) {
+		saved(tab, error);
+	} else if (tab->closing) {
 		tab_release(tab);
-		return;
+	} else if (error == EEXIST) {
+		give_way(tab);
+	} else if (error) {
+		status(tab->editor, "%s: %s", path_name(tab->path), strerror(error));
+		tab_close(tab);
+	} else {
+		index_file(tab);
 	}
-	poor_loop_fd_init(&tab->file, cqe->res);
-	tab->file_open = true;
-	stat_file(tab);
 }
 
 /*
@@ -768,6 +606,7 @@ static void tab_save(struct editor_tab *tab)
 {
 	struct editor *editor = tab->editor;
 	const struct text *text = &tab->document.text;
+	auto bytes = arrview_first(text->size, editor->memory->save);
 
 	if (tab->document.read_only) {
 		status(editor, "%s is read only", path_name(tab->path));
@@ -778,18 +617,14 @@ static void tab_save(struct editor_tab *tab)
 		return;
 	}
 	tab->queued = false;
-	tab->saving = true;
-	tab->error = 0;
-	tab->done = 0;
-	tab->size = text->size;
 	editor->saving = tab;
-	copy_array(arrview_first(text->size, editor->memory->save), arrview_first(text->size, array_ptr(text->bytes, text->capacity)));
+	copy_array(bytes, arrview_first(text->size, array_ptr(text->bytes, text->capacity)));
 	history_save(&tab->document.history);
-	io_uring_prep_openat(need_sqe(poor_loop_get_sqe_or_submit(editor->loop, &tab->create_op)), AT_FDCWD, tab->path,
-			     O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
+	file_write(&tab->file, bytes);
 	changed(editor);
 }
 
+/* A file that isn't there yet is created when it is saved */
 static struct editor_tab *tab_open(struct editor *editor, const char *path)
 {
 	struct editor_tab *tab = tab_find(editor, path);
@@ -801,9 +636,7 @@ static struct editor_tab *tab_open(struct editor *editor, const char *path)
 	if (!(tab = tab_new(editor, path)))
 		return nullptr;
 	tab->loading = true;
-	tab->done = 0;
-	io_uring_prep_openat(need_sqe(poor_loop_get_sqe_or_submit(editor->loop, &tab->open_op)), AT_FDCWD, tab->path,
-			     O_RDONLY | O_CLOEXEC, 0);
+	file_read(&tab->file, array_ptr(tab->document.text.bytes, tab->document.text.capacity));
 	return tab;
 }
 
@@ -833,50 +666,37 @@ static void go(struct editor *editor, const char *path, size_t offset, bool lsp,
 	changed(editor);
 }
 
-/* The jumps that went back are forgotten, and the oldest jump if there is no room. Without a tab nothing is kept. */
-static bool jump_push(struct editor *editor)
+/* Without a tab, a jump leaves nothing to go back to */
+static void jump_push(struct editor *editor)
 {
 	struct editor_tab *tab = editor_tab(editor);
-	struct editor_jump *jump;
-	auto jumps = &editor->memory->jumps;
 
-	if (!tab)
-		return false;
-	if (editor->jump_at == ARRAY_SIZE(jumps)) {
-		memmove(*jumps, arrview_cfront(1, jumps), ARRAY_SIZE_BYTES(arrview_cfront(1, jumps)));
-		editor->jump_at--;
-	}
-	jump = &(*jumps)[editor->jump_at++];
-	jump->offset = tab->document.view.caret;
-	snprintf_array(jump->path, "%s", tab->path);
-	editor->jump_count = editor->jump_at;
-	return true;
+	if (tab)
+		jumps_push(&editor->jumps, tab->path, tab->document.view.caret);
 }
 
-/* Going back from the newest jump keeps where it went, to go forward to */
 static void jump_back(struct editor *editor)
 {
-	if (!editor->jump_at)
-		return;
-	if (editor->jump_at == editor->jump_count && jump_push(editor))
-		editor->jump_at--;
-	editor->jump_at--;
-	go(editor, editor->memory->jumps[editor->jump_at].path, editor->memory->jumps[editor->jump_at].offset, false, 0, 0);
+	struct editor_tab *tab = editor_tab(editor);
+	const struct jump *to = jumps_back(&editor->jumps, tab ? tab->path : nullptr, tab ? tab->document.view.caret : 0);
+
+	if (to)
+		go(editor, to->path, to->offset, false, 0, 0);
 }
 
 static void jump_forward(struct editor *editor)
 {
-	if (editor->jump_at + 1 >= editor->jump_count)
-		return;
-	editor->jump_at++;
-	go(editor, editor->memory->jumps[editor->jump_at].path, editor->memory->jumps[editor->jump_at].offset, false, 0, 0);
+	const struct jump *to = jumps_forward(&editor->jumps);
+
+	if (to)
+		go(editor, to->path, to->offset, false, 0, 0);
 }
 
 static void locate(struct editor *editor, bool declaration)
 {
 	struct editor_tab *tab = editor_tab(editor), *stale;
 
-	if (!tab || tab->loading || !language(tab->path))
+	if (!tab || tab->loading || !lsp_language(tab->path))
 		return;
 	if (editor->lsp.state != LSP_READY) {
 		status(editor, "%s is %s", editor->lsp.argv ? editor->lsp.argv[0] : "The language server",
@@ -1019,14 +839,30 @@ static bool copy(struct editor *editor, bool primary)
 				      arrview(start, end - start, array_ptr(document->text.bytes, document->text.size)));
 }
 
-static void requery(struct editor *editor);
+/* Matches are counted in slices between loop passes, so that a big document doesn't stop the editor */
+static void count_matches(struct editor *editor)
+{
+	if (!find_counted(&editor->find))
+		poor_loop_timer_arm(editor->loop, &editor->counting, 0);
+}
+
+static void on_count(struct poor_loop *loop, struct poor_loop_timer *timer)
+{
+	struct editor *editor = container_of(timer, struct editor, counting);
+
+	if (find_count(&editor->find, EDITOR_COUNT_BYTES))
+		changed(editor);
+	else
+		poor_loop_timer_arm(loop, timer, 0);
+}
 
 /* The gutter grows with the lines, and a query that changed is looked for again */
 static void update(struct editor *editor, bool done)
 {
 	if (!done)
 		return;
-	requery(editor);
+	if (editor->searching && find_update(&editor->find))
+		count_matches(editor);
 	if (indexing_tab(editor))
 		poor_loop_timer_arm(editor->loop, &editor->indexing, 0);
 	editor_layout(editor);
@@ -1069,7 +905,7 @@ static void close_tab(struct editor *editor, struct editor_tab *tab, enum editor
 		status(editor, "%s has changes that aren't saved: close it again to lose them", path_name(tab->path));
 		return;
 	}
-	if (tab->saving || tab->queued) {
+	if (editor->saving == tab || tab->queued) {
 		tab->close_saved = true;
 		return;
 	}
@@ -1120,36 +956,6 @@ static size_t tree_visible(const struct editor *editor)
 	return editor->tree_rect.height > editor->padding ? (editor->tree_rect.height - editor->padding) / editor->cell_height : 0;
 }
 
-static void tree_go(struct editor *editor, uint32_t node)
-{
-	struct tree *tree = &editor->tree;
-	size_t row, visible = tree_visible(editor);
-
-	if (node == TREE_NONE)
-		return;
-	if (!tree_path(tree, node, editor->tree_cursor))
-		editor->tree_cursor[0] = 0;
-	row = tree_row_of(tree, node);
-	if (row < tree->top)
-		tree->top = row;
-	else if (visible && row - tree->top >= visible)
-		tree->top = row - visible + 1;
-	changed(editor);
-}
-
-static void tree_move(struct editor *editor, ptrdiff_t rows)
-{
-	const struct tree *tree = &editor->tree;
-	size_t row = tree_row_of(tree, editor_tree_cursor(editor)), count = tree_rows(tree);
-	size_t distance = rows < 0 ? -(size_t)rows : (size_t)rows;
-
-	if (rows < 0)
-		row = distance < row ? row - distance : 0;
-	else
-		row = distance < count - row ? row + distance : count - 1;
-	tree_go(editor, tree_row(tree, row));
-}
-
 static void tree_open(struct editor *editor, uint32_t node)
 {
 	char path[PATH_MAX];
@@ -1162,28 +968,16 @@ static void tree_open(struct editor *editor, uint32_t node)
 	}
 }
 
-static void tree_seek(struct editor *editor, size_t size, const char (*text)[size])
-{
-	const struct tree *tree = &editor->tree;
-	uint32_t cursor = editor_tree_cursor(editor), node = cursor;
-
-	do {
-		if ((node = tree_next(tree, node)) == TREE_NONE)
-			node = tree_next(tree, 0);
-	} while (node != cursor && strncasecmp(tree_name(tree, node), *text, size));
-	tree_go(editor, node);
-}
-
 static void browse(struct editor *editor)
 {
 	struct editor_tab *tab = editor_tab(editor);
+	struct tree *tree = &editor->tree;
+	uint32_t node = tab ? tree_nearest(tree, tab->path) : 0;
 
 	stop_searching(editor);
 	editor->browsing = editor->show_tree = true;
 	editor_layout(editor);
-	if (tab && tree_nearest(&editor->tree, tab->path))
-		snprintf_array(editor->tree_cursor, "%s", tab->path);
-	tree_go(editor, editor_tree_cursor(editor));
+	tree_go(tree, node ? node : tree_cursor(tree), tree_visible(editor));
 	changed(editor);
 }
 
@@ -1197,9 +991,10 @@ static void stop_browsing(struct editor *editor)
 
 static bool tree_key(struct editor *editor, xkb_keysym_t sym, size_t size, const char (*text)[size])
 {
-	const struct tree *tree = &editor->tree;
-	uint32_t node = editor_tree_cursor(editor);
-	ptrdiff_t page = tree_visible(editor) > 1 ? tree_visible(editor) - 1 : 1;
+	struct tree *tree = &editor->tree;
+	uint32_t node = tree_cursor(tree);
+	size_t visible = tree_visible(editor);
+	ptrdiff_t page = visible > 1 ? visible - 1 : 1;
 
 	if (sym == XKB_KEY_Escape) {
 		stop_browsing(editor);
@@ -1207,31 +1002,32 @@ static bool tree_key(struct editor *editor, xkb_keysym_t sym, size_t size, const
 	}
 	if (node == TREE_NONE)
 		return false;
-	tree_go(editor, node);
+	tree_go(tree, node, visible);
+	changed(editor);
 	switch (sym) {
 	case XKB_KEY_Up:
 	case XKB_KEY_Down:
-		tree_move(editor, sym == XKB_KEY_Up ? -1 : 1);
+		tree_move(tree, sym == XKB_KEY_Up ? -1 : 1, visible);
 		return true;
 	case XKB_KEY_Page_Up:
 	case XKB_KEY_Page_Down:
-		tree_move(editor, sym == XKB_KEY_Page_Up ? -page : page);
+		tree_move(tree, sym == XKB_KEY_Page_Up ? -page : page, visible);
 		return true;
 	case XKB_KEY_Home:
 	case XKB_KEY_End:
-		tree_move(editor, sym == XKB_KEY_Home ? -PTRDIFF_MAX : PTRDIFF_MAX);
+		tree_move(tree, sym == XKB_KEY_Home ? -PTRDIFF_MAX : PTRDIFF_MAX, visible);
 		return false;
 	case XKB_KEY_Right:
 		if (tree->nodes[node].directory && !tree->nodes[node].expanded)
 			tree_open(editor, node);
 		else if (tree->nodes[node].expanded && tree->nodes[node].count)
-			tree_go(editor, tree->nodes[node].first);
+			tree_go(tree, tree->nodes[node].first, visible);
 		return true;
 	case XKB_KEY_Left:
 		if (tree->nodes[node].expanded)
 			tree_open(editor, node);
 		else if (tree->nodes[node].parent)
-			tree_go(editor, tree->nodes[node].parent);
+			tree_go(tree, tree->nodes[node].parent, visible);
 		return true;
 	case XKB_KEY_Return:
 	case XKB_KEY_KP_Enter:
@@ -1239,95 +1035,8 @@ static bool tree_key(struct editor *editor, xkb_keysym_t sym, size_t size, const
 		return false;
 	}
 	if (printable(size, text))
-		tree_seek(editor, size, text);
+		tree_seek_impl(tree, size, text, visible);
 	return false;
-}
-
-/* Matches are counted in slices between loop passes, so that a big document doesn't stop the editor */
-static void count_matches(struct editor *editor)
-{
-	editor->search_counted = editor->search_count = editor->search_index = 0;
-	poor_loop_timer_arm(editor->loop, &editor->counting, 0);
-}
-
-static void on_count(struct poor_loop *loop, struct poor_loop_timer *timer)
-{
-	struct editor *editor = container_of(timer, struct editor, counting);
-	const struct text *text = &editor->search_tab->document.text;
-	size_t from = editor->search_counted;
-	size_t end = text->size - from > EDITOR_COUNT_BYTES ? from + EDITOR_COUNT_BYTES : text->size;
-
-	editor->search_count += search_count(&editor->search, text, from, end, editor->search_match, &editor->search_index);
-	editor->search_counted = end;
-	if (end < text->size)
-		poor_loop_timer_arm(loop, timer, 0);
-	else
-		changed(editor);
-}
-
-/* A match that didn't show goes to the upper third, like after a jump */
-static void show_match(struct editor_tab *tab, size_t match, size_t size)
-{
-	struct view *view = &tab->document.view;
-	size_t top = view->top, line = text_line_of(&tab->document.text, match), rows = view_rows(view);
-
-	document_select(&tab->document, match, match + size);
-	if (view->top != top)
-		view->top = line > rows / 3 ? line - rows / 3 : 0;
-	view_reveal(view, match);
-}
-
-/* The first match after the start of the selection, or the last one before it, around the ends of the document */
-static size_t next_match(const struct search *search, const struct document *document, bool back)
-{
-	const struct text *text = &document->text;
-	size_t start, end, from, match;
-
-	view_selection(&document->view, &start, &end);
-	if (back) {
-		match = search_backward(search, text, 0, start);
-		return match != SIZE_MAX ? match : search_backward(search, text, start, text->size);
-	}
-	from = start + (start != end);
-	match = search_forward(search, text, from, text->size);
-	return match != SIZE_MAX ? match : search_forward(search, text, 0, from);
-}
-
-static void find(struct editor *editor)
-{
-	struct editor_tab *tab = editor->search_tab;
-	const struct text *text = &tab->document.text;
-	size_t match = search_forward(&editor->search, text, editor->search_origin, text->size);
-
-	if (match == SIZE_MAX)
-		match = search_forward(&editor->search, text, 0, editor->search_origin);
-	editor->search_match = match;
-	if (match == SIZE_MAX)
-		document_place(&tab->document, editor->search_origin, false);
-	else
-		show_match(tab, match, editor->search.size);
-	count_matches(editor);
-	changed(editor);
-}
-
-/* Counted matches come in their order, the next one is after the selected one */
-static void step(struct editor *editor, bool back)
-{
-	struct editor_tab *tab = editor->search_tab;
-	size_t match = next_match(&editor->search, &tab->document, back), *index = &editor->search_index;
-	bool counted = editor->search_match != SIZE_MAX && editor->search_counted == tab->document.text.size;
-
-	if (match == SIZE_MAX)
-		return;
-	editor->search_match = editor->search_origin = match;
-	show_match(tab, match, editor->search.size);
-	if (!counted)
-		count_matches(editor);
-	else if (back)
-		*index = *index > 1 ? *index - 1 : editor->search_count;
-	else
-		*index = *index < editor->search_count ? *index + 1 : 1;
-	changed(editor);
 }
 
 static const struct {
@@ -1350,72 +1059,33 @@ static bool motion_of(xkb_keysym_t sym, enum document_motion *motion)
 	return false;
 }
 
-static void compile(struct editor *editor)
+static void start_searching(struct editor *editor, struct editor_tab *tab)
 {
-	const struct text *text = &editor->query.text;
-
-	search_init(&editor->search);
-	search_add(&editor->search, arrview_first(text->size, array_ptr(text->bytes, text->capacity)));
-	editor->query_version = editor->query.version;
-}
-
-static void requery(struct editor *editor)
-{
-	if (!editor->searching || editor->query.version == editor->query_version)
-		return;
-	compile(editor);
-	find(editor);
-}
-
-static bool query_insert(struct editor *editor, size_t size, const char (*bytes)[size])
-{
-	struct document *query = &editor->query;
-	size_t start, end, fit;
-
-	view_selection(&query->view, &start, &end);
-	fit = search_fit_impl(size, bytes, query->text.capacity - query->text.size + end - start);
-	return (fit || start != end) && document_insert(query, arrview_first(fit, bytes), false);
-}
-
-static void search_start(struct editor *editor, struct editor_tab *tab)
-{
-	const struct text *text = &tab->document.text;
-	size_t start, end;
-
-	document_select_all(&editor->query);
 	if (editor->searching) {
+		document_select_all(&editor->find.query);
 		changed(editor);
 		return;
 	}
 	editor->browsing = false;
 	editor->drag = EDITOR_IDLE;
 	editor->searching = true;
-	editor->search_tab = tab;
-	view_selection(&tab->document.view, &start, &end);
-	if (start != end && text_line_of(text, start) == text_line_of(text, end)) {
-		query_insert(editor, end - start, arrview(start, end - start, array_ptr(text->bytes, text->size)));
-		document_select_all(&editor->query);
-		compile(editor);
-	}
-	editor->search_origin = start;
-	editor->search_match = end - start == editor->search.size && search_at(&editor->search, text, start) ? start : SIZE_MAX;
+	find_start(&editor->find, &tab->document);
 	count_matches(editor);
 	changed(editor);
 }
 
 static void search_again(struct editor *editor, struct editor_tab *tab, bool back)
 {
-	size_t match;
+	const struct search *search = &editor->find.search;
 
-	if (!editor->search.size) {
+	if (!search->size) {
 		status(editor, "Nothing to find");
 		return;
 	}
-	if ((match = next_match(&editor->search, &tab->document, back)) == SIZE_MAX) {
-		status(editor, "\"%.*s\" isn't in %s", (int)editor->search.size, editor->search.query, path_name(tab->path));
+	if (find_again(&editor->find, &tab->document, back) == SIZE_MAX) {
+		status(editor, "\"%.*s\" isn't in %s", (int)search->size, search->query, path_name(tab->path));
 		return;
 	}
-	show_match(tab, match, editor->search.size);
 	changed(editor);
 }
 
@@ -1456,7 +1126,7 @@ static bool control_key(struct editor *editor, struct editor_tab *tab, xkb_keysy
 		return false;
 	case XKB_KEY_f:
 		if (tab && !tab->loading)
-			search_start(editor, tab);
+			start_searching(editor, tab);
 		return false;
 	}
 	if (!document)
@@ -1544,7 +1214,10 @@ bool editor_key(struct editor *editor, xkb_keysym_t sym, uint32_t modifiers, siz
 		case XKB_KEY_Return:
 		case XKB_KEY_KP_Enter:
 		case XKB_KEY_F3:
-			step(editor, shift);
+			if (find_step(&editor->find, shift)) {
+				count_matches(editor);
+				changed(editor);
+			}
 			return true;
 		case XKB_KEY_Tab:
 		case XKB_KEY_ISO_Left_Tab:
@@ -1619,8 +1292,7 @@ static void tree_click(struct editor *editor, double y)
 
 	if (node == TREE_NONE)
 		return;
-	if (!tree_path(&editor->tree, node, editor->tree_cursor))
-		editor->tree_cursor[0] = 0;
+	tree_place(&editor->tree, node);
 	editor->browsing = true;
 	tree_open(editor, node);
 }
@@ -1745,20 +1417,11 @@ void editor_leave(struct editor *editor)
 void editor_scroll(struct editor *editor, double x, double y, ptrdiff_t rows, ptrdiff_t columns)
 {
 	struct editor_tab *tab = editor_tab(editor);
-	struct tree *tree = &editor->tree;
-	size_t count, visible;
 
 	if (inside(&editor->tree_rect, x, y)) {
 		if (!editor->started)
 			return;
-		count = tree_rows(tree);
-		visible = tree_visible(editor);
-		if (rows < 0)
-			tree->top = (size_t)-rows < tree->top ? tree->top - (size_t)-rows : 0;
-		else
-			tree->top += rows;
-		if (tree->top + visible > count)
-			tree->top = count > visible ? count - visible : 0;
+		tree_scroll(&editor->tree, rows, tree_visible(editor));
 		changed(editor);
 	} else if (inside(&editor->tabs_rect, x, y)) {
 		if (rows)
@@ -1779,9 +1442,9 @@ void editor_paste_impl(struct editor *editor, size_t size, const char (*bytes)[s
 	if (!tab || !size)
 		return;
 	if (editor->paste_query) {
-		if (editor->searching && editor->search_tab == tab) {
+		if (searching_in(editor, tab)) {
 			interrupt(editor);
-			update(editor, query_insert(editor, size, bytes));
+			update(editor, find_insert_impl(&editor->find, size, bytes));
 		}
 		return;
 	}
@@ -1795,7 +1458,7 @@ void editor_paste_impl(struct editor *editor, size_t size, const char (*bytes)[s
 	view_select(&document->view, editor->paste_anchor, editor->paste_caret);
 	if (document_insert_impl(document, size, bytes, false)) {
 		interrupt(editor);
-		if (tab == editor->search_tab)
+		if (searching_in(editor, tab))
 			stop_searching(editor);
 		update(editor, true);
 		return;
@@ -1834,7 +1497,7 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	editor->memory = memory;
 	editor->saving = nullptr;
 	editor->tab_count = editor->active = editor->tab_first = 0;
-	editor->jump_count = editor->jump_at = 0;
+	jumps_init(&editor->jumps, memory->jumps);
 	editor->request = 0;
 	editor->paste_tab = nullptr;
 	editor->width = editor->height = 0;
@@ -1851,7 +1514,6 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	editor->show_tree = true;
 	editor->status[0] = 0;
 	editor->root[0] = 0;
-	editor->tree_cursor[0] = 0;
 	editor->started = false;
 	foreach_array_ref(editor->tabs, tab)
 		tab->used = false;
@@ -1859,12 +1521,7 @@ void editor_init(struct editor *editor, struct poor_loop *loop, const struct edi
 	poor_loop_timer_init(&editor->indexing, on_index);
 	poor_loop_timer_init(&editor->counting, on_count);
 	poor_loop_timer_init(&editor->prompting, on_prompt);
-	document_init(&editor->query, memory->query.bytes, memory->query.lines, memory->query.states, memory->query.edits,
-		      memory->query.history);
-	editor->query.literal = true;
-	editor->query_version = editor->query.version;
-	search_init(&editor->search);
-	editor->search_tab = nullptr;
+	find_init(&editor->find, &memory->find);
 	editor->searching = editor->paste_query = false;
 	editor->highlight_tab = nullptr;
 	lsp_init(&editor->lsp, loop, &lsp_listener, &memory->lsp);
@@ -1898,16 +1555,14 @@ void editor_stop(struct editor *editor)
 			continue;
 		tab->closing = true;
 		tab->indexing = false;
-		foreach_array_ref(((struct poor_loop_op *[]){ &tab->open_op, &tab->read_op }), op)
-			if ((*op)->pending)
-				io_uring_prep_cancel(need_sqe(poor_loop_get_untracked_sqe_or_submit(editor->loop)), *op, 0);
+		file_cancel(&tab->file);
 	}
 }
 
 bool editor_busy(const struct editor *editor)
 {
 	foreach_array_const_ref(editor->tabs, tab)
-		if (tab->used && tab_busy(tab))
+		if (tab->used && tab->file.busy)
 			return true;
 	return (editor->started && tree_busy(&editor->tree)) || lsp_busy(&editor->lsp);
 }

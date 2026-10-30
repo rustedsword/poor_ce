@@ -57,7 +57,7 @@ struct tree_memory {
  * The files under the directory 'root', which is node 0, without the hidden ones, in memory of the caller.
  * Directories are read when they expand, one at a time, while the others wait in 'queue', and read again a while
  * after they changed. A directory that is read gets the nodes from 'block' on, its nodes from before are 'left'.
- * 'top' is the first row that shows.
+ * 'top' is the first row that shows, and 'cursor' the path of the row that keys move.
  */
 struct tree {
 	struct poor_loop *loop;
@@ -77,6 +77,7 @@ struct tree {
 	bool directory_open, watching, stopped;
 	char root[PATH_MAX];
 	char path[PATH_MAX];
+	char cursor[PATH_MAX];
 };
 
 void tree_init(struct tree *tree, struct poor_loop *loop, const char *root, const struct tree_listener *listener,
@@ -98,6 +99,19 @@ const char *tree_name(const struct tree *tree, uint32_t node);
 /* The absolute path of a node, false if it doesn't fit */
 [[nodiscard]] bool tree_path_impl(const struct tree *tree, uint32_t node, size_t size, char (*path)[size]);
 #define tree_path(tree, node, path) tree_path_impl(tree, node, ARRAY_SIZE(path), &auto_arr(path))
+/* The row of the cursor, or the last one on the way to it that shows, or the first row. TREE_NONE without rows. */
+uint32_t tree_cursor(const struct tree *tree);
+/* The cursor goes to 'node', without scrolling */
+void tree_place(struct tree *tree, uint32_t node);
+/* The cursor goes to 'node', the rows scroll for it to show among the 'visible' ones */
+void tree_go(struct tree *tree, uint32_t node, size_t visible);
+/* The cursor goes 'rows' rows down, or up, as far as there are rows */
+void tree_move(struct tree *tree, ptrdiff_t rows, size_t visible);
+/* The cursor goes to the next row whose name starts with 'prefix', in either case */
+void tree_seek_impl(struct tree *tree, size_t size, const char (*prefix)[size], size_t visible);
+#define tree_seek(tree, prefix, visible) tree_seek_impl(tree, ARRAY_SIZE(prefix), &auto_arr(prefix), visible)
+/* Scroll by 'rows' rows, as far as rows are left to fill the 'visible' ones */
+void tree_scroll(struct tree *tree, ptrdiff_t rows, size_t visible);
 /* Stop reading, wait until tree_busy() is false before the memory goes */
 void tree_stop(struct tree *tree);
 bool tree_busy(const struct tree *tree);

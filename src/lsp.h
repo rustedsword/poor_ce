@@ -88,6 +88,8 @@ struct lsp {
 void lsp_init(struct lsp *lsp, struct poor_loop *loop, const struct lsp_listener *listener, struct lsp_memory *memory);
 /* Run the server 'argv' for the project at the absolute path 'root' */
 void lsp_start(struct lsp *lsp, const char *root, const char *const *argv);
+/* The language of a file for the server, nullptr for one that it doesn't take */
+const char *lsp_language(const char *path);
 /* Returns whether the document goes to the server, it doesn't while there is no room for it */
 [[nodiscard]] bool lsp_open(struct lsp *lsp, const char *path, const char *language, uint64_t version, const struct text *text);
 [[nodiscard]] bool lsp_change(struct lsp *lsp, const char *path, uint64_t version, const struct text *text, size_t mark);

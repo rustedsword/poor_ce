@@ -8,10 +8,10 @@ constexpr size_t SEARCH_BYTES = 256;
 
 /*
  * ASCII letters match in either case unless the query has an ASCII capital. Matches start and end between characters,
- * and may overlap.
+ * and may overlap. They are looked for at the byte 'anchor' of the query, which is the rarest one, roughly.
  */
 struct search {
-	size_t size;
+	size_t size, anchor;
 	bool exact;
 	char query[SEARCH_BYTES];
 };

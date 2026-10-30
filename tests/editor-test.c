@@ -189,8 +189,8 @@ TEST(editor_saves)
 	type(&editor, XKB_KEY_x, 0, "x");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_y, 0, "y");
-	assert(tab->saving && history_modified(&tab->document.history));
-	run_until(&loop, !tab->saving);
+	assert(editor.saving == tab && history_modified(&tab->document.history));
+	run_until(&loop, editor.saving != tab);
 	assert(file_is(&project, "main.c", "int main(void) x\n{\n\treturn x;\n}\n") && !strcmp(editor.status, "main.c is saved"));
 	type(&editor, XKB_KEY_w, SEAT_CONTROL, "");
 	assert(editor.tab_count == 1 && editor.confirm == EDITOR_CLOSING);
@@ -208,7 +208,7 @@ TEST(editor_saves)
 	type(&editor, XKB_KEY_a, 0, "a");
 	type(&editor, XKB_KEY_Return, 0, "\r");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(file_is(&project, "new.c", "a\n") && !history_modified(&tab->document.history));
 	stop(&editor, &loop);
 	project_fini(&project);
@@ -244,7 +244,7 @@ TEST(editor_closes_after_saves)
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_w, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_z, 0, "z");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(editor.tab_count == 1 && history_modified(&tab->document.history));
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_q, SEAT_CONTROL, "");
@@ -328,15 +328,43 @@ TEST(editor_keeps_unsaved)
 	type(&editor, XKB_KEY_a, 0, "a");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_w, SEAT_CONTROL, "");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(editor_tab(&editor) == tab && history_unsaved(&tab->document.history));
 	assert(!strcmp(editor.status, "new.c: No such file or directory"));
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_q, SEAT_CONTROL, "");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(!editor.quitting && events.quits == quits && editor.tab_count == 1);
 	type(&editor, XKB_KEY_q, SEAT_CONTROL, "");
 	assert(editor.confirm == EDITOR_QUITTING && events.quits == quits);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* A file that fails while it is read closes its tab, also when it tells by then that it isn't there */
+TEST(editor_closes_unreadable_files)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	char expected[64];
+	int fd = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 200);
+
+	assert(fd >= 0);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	snprintf_array(project.path, "/proc/%d/fdinfo/%d", getpid(), fd);
+	snprintf_array(expected, "%d: No such file or directory", fd);
+	editor_open(&editor, project.path);
+	tab = editor_tab(&editor);
+	run_until(&loop, !tab->file.open_op.pending);
+	close(fd);
+	run_until(&loop, !editor.tab_count || !tab->loading);
+	assert(!editor.tab_count && !strcmp(editor.status, expected));
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -662,7 +690,7 @@ TEST(editor_drops_definitions_after_navigation)
 	type(&editor, XKB_KEY_Return, 0, "\r");
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	pause_for(&loop, 300'000'000);
-	assert(editor_tab(&editor) == code && editor.tab_count == 2 && !editor.jump_count);
+	assert(editor_tab(&editor) == code && editor.tab_count == 2 && !editor.jumps.count);
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -692,17 +720,17 @@ TEST(editor_saves_once)
 	assert(first != second && editor.tab_count == 2);
 	type(&editor, XKB_KEY_b, 0, "b");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !second->saving);
+	run_until(&loop, editor.saving != second);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_a, 0, "a");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !first->saving);
+	run_until(&loop, editor.saving != first);
 	assert(file_is(&project, "new.c", "b") && history_modified(&first->document.history));
 	assert(!strcmp(editor.status, "new.c isn't saved, another tab has its file"));
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_c, 0, "c");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !second->saving);
+	run_until(&loop, editor.saving != second);
 	assert(file_is(&project, "new.c", "bc") && !history_modified(&second->document.history));
 	stop(&editor, &loop);
 	project_fini(&project);
@@ -795,11 +823,11 @@ TEST(editor_drops_stale_definitions)
 	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_z, 0, "z");
 	run_until(&loop, !editor.request);
-	assert(editor_tab(&editor) == code && editor.tab_count == 2 && !editor.jump_count);
+	assert(editor_tab(&editor) == code && editor.tab_count == 2 && !editor.jumps.count);
 	type(&editor, XKB_KEY_Return, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	run_until(&loop, !editor.request);
-	assert(editor_tab(&editor) == notes && editor.tab_count == 2 && !editor.jump_count);
+	assert(editor_tab(&editor) == notes && editor.tab_count == 2 && !editor.jumps.count);
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -832,7 +860,7 @@ TEST(editor_goes_back_without_tabs)
 	assert(!editor.tab_count);
 	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
 	tab = loaded(&editor, &loop);
-	assert(!strcmp(path_name(tab->path), "main.c") && tab->document.view.caret == 25 && !editor.jump_at);
+	assert(!strcmp(path_name(tab->path), "main.c") && tab->document.view.caret == 25 && !editor.jumps.at);
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -1251,7 +1279,7 @@ TEST(editor_highlights_with_other_documents)
 	run_until(&loop, header->lsp_version == header->document.version);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !header->saving);
+	run_until(&loop, editor.saving != header);
 	run_until(&loop, !code->tokens_version);
 	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
 	run_until(&loop, code->tokens_version == code->document.version);
@@ -1284,7 +1312,7 @@ TEST(editor_tells_saves)
 	type(&editor, XKB_KEY_x, 0, "x");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_y, 0, "y");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(tab->lsp_version == tab->document.version);
 	run_until(&loop, !tab->tokens_version);
 	run_until(&loop, tab->tokens_version == tab->document.version);
@@ -1716,7 +1744,7 @@ TEST(editor_tree_follows)
 
 static bool cursor_is(const char *name)
 {
-	uint32_t node = editor_tree_cursor(&editor);
+	uint32_t node = tree_cursor(&editor.tree);
 
 	return node != TREE_NONE && !strcmp(tree_name(&editor.tree, node), name);
 }
@@ -1767,7 +1795,7 @@ TEST(editor_tree_keys)
 	type(&editor, XKB_KEY_x, 0, "x");
 	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(file_is(&project, "main.c", "xint main(void)\n{\n\treturn x;\n}\n"));
 	type(&editor, XKB_KEY_e, SEAT_CONTROL, "");
 	assert(!editor_browsing(&editor));
@@ -1785,6 +1813,24 @@ TEST(editor_tree_keys)
 	assert(!editor.tab_count && editor_browsing(&editor));
 	type(&editor, XKB_KEY_Up, 0, "");
 	assert(cursor_is("sub"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* Before the root is read, the tree has no rows for the cursor to go to */
+TEST(editor_tree_seeks_without_rows)
+{
+	static struct project project;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	tree_seek(&editor.tree, arrview_str("m"), 10);
+	tree_move(&editor.tree, 1, 10);
+	assert(tree_cursor(&editor.tree) == TREE_NONE);
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -1980,12 +2026,12 @@ TEST(editor_tree_browses_from_unread_directories)
 
 static void counted(struct poor_loop *loop, const struct editor_tab *tab)
 {
-	run_until(loop, editor.search_counted == tab->document.text.size);
+	run_until(loop, editor.find.counted == tab->document.text.size);
 }
 
 static bool query_is(const char *contents, size_t anchor, size_t caret)
 {
-	const struct document *query = &editor.query;
+	const struct document *query = &editor.find.query;
 
 	return query->text.size == strlen(contents) && !memcmp(query->text.bytes, contents, query->text.size) &&
 	       query->view.anchor == anchor && query->view.caret == caret;
@@ -2015,21 +2061,21 @@ TEST(editor_searches)
 	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_x, 0, "x");
 	counted(&loop, tab);
-	assert(editor.searching && caret_of(tab, 11, 12) && editor.search_index == 2 && editor.search_count == 3);
+	assert(editor.searching && caret_of(tab, 11, 12) && editor.find.index == 2 && editor.find.count == 3);
 	type(&editor, XKB_KEY_Return, 0, "\r");
-	assert(caret_of(tab, 22, 23) && editor.search_index == 3);
+	assert(caret_of(tab, 22, 23) && editor.find.index == 3);
 	type(&editor, XKB_KEY_Return, 0, "\r");
-	assert(caret_of(tab, 4, 5) && editor.search_index == 1);
+	assert(caret_of(tab, 4, 5) && editor.find.index == 1);
 	type(&editor, XKB_KEY_Return, SEAT_SHIFT, "\r");
-	assert(caret_of(tab, 22, 23) && editor.search_index == 3);
+	assert(caret_of(tab, 22, 23) && editor.find.index == 3);
 	type(&editor, XKB_KEY_BackSpace, 0, "");
 	assert(caret_of(tab, 22, 22));
 	type(&editor, XKB_KEY_x, SEAT_SHIFT, "X");
 	counted(&loop, tab);
-	assert(caret_of(tab, 11, 12) && editor.search_index == 1 && editor.search_count == 1);
+	assert(caret_of(tab, 11, 12) && editor.find.index == 1 && editor.find.count == 1);
 	type(&editor, XKB_KEY_q, 0, "q");
 	counted(&loop, tab);
-	assert(caret_of(tab, 22, 22) && !editor.search_count);
+	assert(caret_of(tab, 22, 22) && !editor.find.count);
 	type(&editor, XKB_KEY_Escape, 0, "");
 	type(&editor, XKB_KEY_F3, 0, "");
 	assert(!editor.searching && !strcmp(editor.status, "\"Xq\" isn't in main.c"));
@@ -2072,7 +2118,7 @@ TEST(editor_searches_the_selection)
 	assert(document_place(&tab->document, 16, false) && document_place(&tab->document, 22, true));
 	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
 	counted(&loop, tab);
-	assert(query_is("return", 0, 6) && caret_of(tab, 16, 22) && editor.search_index == 1 && editor.search_count == 1);
+	assert(query_is("return", 0, 6) && caret_of(tab, 16, 22) && editor.find.index == 1 && editor.find.count == 1);
 	type(&editor, XKB_KEY_End, 0, "");
 	type(&editor, XKB_KEY_space, 0, " ");
 	assert(query_is("return ", 7, 7) && caret_of(tab, 16, 23));
@@ -2096,7 +2142,7 @@ TEST(editor_searches_the_selection)
 	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
 	assert(events.pastes == pastes + 1 && !events.primary);
 	editor_paste(&editor, arrview_str("X2;\nreturn"));
-	assert(editor.search.size == 3 && caret_of(tab, 12, 15) && text_is(tab, "aint x;\nint X2;\nreturn x;\n"));
+	assert(editor.find.search.size == 3 && caret_of(tab, 12, 15) && text_is(tab, "aint x;\nint X2;\nreturn x;\n"));
 	click(editor.text_rect.x + 5, editor.text_rect.y + 5, 0);
 	assert(!editor.searching && caret_of(tab, 0, 0));
 	snprintf_array(project.path, "%s/tar get.h", project.root);
@@ -2197,13 +2243,13 @@ TEST(editor_counts_matches_in_slices)
 	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_y, 0, "y");
 	assert(caret_of(tab, text_line_start(text, 1000) + 10, text_line_start(text, 1000) + 11));
-	while (editor.search_counted < text->size) {
-		before = editor.search_counted;
+	while (editor.find.counted < text->size) {
+		before = editor.find.counted;
 		assert(!poor_loop_run_once(&loop));
-		assert(editor.search_counted - before <= EDITOR_COUNT_BYTES);
+		assert(editor.find.counted - before <= EDITOR_COUNT_BYTES);
 		slices++;
 	}
-	assert(slices > 1 && editor.search_count == text->line_count - 1 && editor.search_index == 1001);
+	assert(slices > 1 && editor.find.count == text->line_count - 1 && editor.find.index == 1001);
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -2237,7 +2283,7 @@ TEST(editor_searches_through_late_pastes)
 	type(&editor, XKB_KEY_Escape, 0, "");
 	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
 	editor_paste(&editor, arrview_str("return"));
-	assert(editor.searching && editor.search.size == 1 && caret_of(code, 25, 26));
+	assert(editor.searching && editor.find.search.size == 1 && caret_of(code, 25, 26));
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -2265,11 +2311,11 @@ TEST(editor_searches_through_failed_pastes)
 	type(&editor, XKB_KEY_x, 0, "x");
 	type(&editor, XKB_KEY_Return, 0, "\r");
 	counted(&loop, tab);
-	assert(caret_of(tab, 2, 3) && editor.search_index == 2);
+	assert(caret_of(tab, 2, 3) && editor.find.index == 2);
 	editor_paste(&editor, arrview_str("y"));
 	assert(editor.searching && caret_of(tab, 2, 3) && text_is(tab, "x x x\n"));
 	type(&editor, XKB_KEY_Return, 0, "\r");
-	assert(caret_of(tab, 4, 5) && editor.search_index == 3);
+	assert(caret_of(tab, 4, 5) && editor.find.index == 3);
 	stop(&editor, &loop);
 	project_fini(&project);
 }
@@ -2343,7 +2389,7 @@ TEST(editor_searches_through_statuses)
 	run_until(&loop, !poor_loop_timer_armed(&editor.prompting));
 	assert(editor.searching && editor.status[0]);
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(!strcmp(editor.status, "main.c is saved") && poor_loop_timer_armed(&editor.prompting));
 	assert(editor.prompting.deadline > poor_loop_now() + EDITOR_PROMPT_NS / 2);
 	poor_loop_timer_arm(&loop, &editor.prompting, 0);
@@ -2351,7 +2397,7 @@ TEST(editor_searches_through_statuses)
 	assert(editor.searching);
 	type(&editor, XKB_KEY_Escape, 0, "");
 	type(&editor, XKB_KEY_s, SEAT_CONTROL, "");
-	run_until(&loop, !tab->saving);
+	run_until(&loop, editor.saving != tab);
 	assert(!strcmp(editor.status, "main.c is saved") && !poor_loop_timer_armed(&editor.prompting));
 	stop(&editor, &loop);
 	project_fini(&project);
@@ -2427,7 +2473,7 @@ TEST(editor_clicks_the_query)
 {
 	static struct project project;
 	static char long_query[SEARCH_BYTES + 10];
-	const struct view *view = &editor.query.view;
+	const struct view *view = &editor.find.query.view;
 	struct editor_tab *tab;
 	struct poor_loop loop;
 	int32_t x, y, cell;
@@ -2465,7 +2511,7 @@ TEST(editor_clicks_the_query)
 	type(&editor, XKB_KEY_a, SEAT_CONTROL, "");
 	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
 	editor_paste(&editor, long_query);
-	assert(editor.query.text.size == SEARCH_BYTES && view->left && view->left + view_columns(view) == SEARCH_BYTES + 1);
+	assert(editor.find.query.text.size == SEARCH_BYTES && view->left && view->left + view_columns(view) == SEARCH_BYTES + 1);
 	click(x, y, 7000);
 	assert(view->anchor == view->left && view->caret == view->left);
 	type(&editor, XKB_KEY_a, SEAT_CONTROL, "");

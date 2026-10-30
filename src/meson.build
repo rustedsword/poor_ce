@@ -43,14 +43,14 @@ foreach shader : [ 'text.vert', 'text.frag' ]
 endforeach
 
 ce_inc = include_directories('.')
-text_sources = files('text.c', 'view.c', 'history.c', 'document.c', 'syntax.c', 'json.c', 'path.c', 'search.c')
+text_sources = files('text.c', 'view.c', 'history.c', 'document.c', 'syntax.c', 'json.c', 'path.c', 'search.c', 'find.c', 'jumps.c')
 font_sources = files('font.c', 'atlas.c')
 log_sources = files('logger.c')
 seat_sources = files('seat.c')
 render_sources = files('render.c')
 damage_sources = files('damage.c')
 lsp_sources = files('lsp.c')
-editor_sources = files('tree.c', 'editor.c', 'scene.c')
+editor_sources = files('tree.c', 'file.c', 'editor.c', 'scene.c')
 
 executable(
 	'ce',

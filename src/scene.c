@@ -156,7 +156,7 @@ static void tree(struct scene *scene)
 	const struct editor_rect *rect = &editor->tree_rect;
 	const struct editor_tab *tab = editor_tab(editor);
 	uint32_t active = tab && editor->started ? tree_find(tree, tab->path) : TREE_NONE;
-	uint32_t cursor = editor_browsing(editor) ? editor_tree_cursor(editor) : TREE_NONE;
+	uint32_t cursor = editor_browsing(editor) ? tree_cursor(&editor->tree) : TREE_NONE;
 	int32_t y = rect->y + editor->padding, end = rect->x + rect->width - editor->padding;
 
 	if (!rect->width)
@@ -246,7 +246,7 @@ static void selection(struct scene *scene, const struct document *document, size
 /* Overlapping matches make one band. Left of the view, only matches that start close enough to reach into it count. */
 static void matches(struct scene *scene, const struct document *document, size_t line, int32_t y)
 {
-	const struct search *search = &scene->editor->search;
+	const struct search *search = &scene->editor->find.search;
 	const struct text *text = &document->text;
 	const struct view *view = &document->view;
 	size_t last = view->left + view_columns(view), start = text_line_start(text, line), from = SIZE_MAX, end = 0, edge;
@@ -430,7 +430,7 @@ static void text(struct scene *scene)
 		if (!selected && line == caret_line)
 			solid(scene, gutter->x, y, gutter->width + rect->width, editor->cell_height, CURRENT_LINE);
 		number(scene, gutter->x + gutter->width - editor->cell_width, y, line + 1, line == caret_line ? TEXT : LINE_NUMBER);
-		if (editor->searching && editor->search.size)
+		if (editor->searching && editor->find.search.size)
 			matches(scene, document, line, y);
 		if (selected)
 			selection(scene, document, line, y, start, end);
@@ -450,7 +450,7 @@ static void prompt(struct scene *scene, int32_t x, int32_t y, int32_t end)
 {
 	const struct editor *editor = scene->editor;
 	const struct editor_rect *rect = &editor->query_rect;
-	const struct document *query = &editor->query;
+	const struct document *query = &editor->find.query;
 	const struct text *text = &query->text;
 	const struct view *view = &query->view;
 	int32_t cell = editor->cell_width;

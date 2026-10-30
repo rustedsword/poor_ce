@@ -7,7 +7,9 @@
 
 #include "atlas.h"
 #include "document.h"
+#include "find.h"
 #include "json.h"
+#include "jumps.h"
 #include "path.h"
 #include "search.h"
 #include "syntax.h"
@@ -351,7 +353,29 @@ TEST(search_matches)
 	assert(search_forward(&search, text, 0, text->size) == SIZE_MAX && !search_at(&search, text, 0));
 }
 
-/* A case of the first byte that isn't there is looked for once, not once for each match */
+/* Matches are found from a rarer byte than the first, also when it is past the end of the range */
+TEST(search_anchors)
+{
+	static struct sample sample;
+	const struct text *text = &sample.text;
+	struct search search;
+	size_t upto = 0;
+
+	assert(text_of(&sample, 8, "zeZ ez Ez eZ e z \xd0\xbf\xd0\xb5"));
+	query(&search, "ez");
+	assert(search.anchor == 1 && search_forward(&search, text, 0, text->size) == 1);
+	assert(search_forward(&search, text, 2, text->size) == 4 && search_forward(&search, text, 0, 2) == 1);
+	assert(search_forward(&search, text, 0, 1) == SIZE_MAX && search_backward(&search, text, 2, 4) == SIZE_MAX);
+	assert(search_backward(&search, text, 0, text->size) == 10 && search_backward(&search, text, 0, 10) == 7);
+	assert(search_count(&search, text, 0, text->size, 4, &upto) == 4 && upto == 2);
+	query(&search, "eZ");
+	assert(search.exact && search.anchor == 1 && search_count(&search, text, 0, text->size, 0, &upto) == 2);
+	query(&search, "\xd0\xbf\xd0\xb5");
+	assert(search.anchor == 1 && search_forward(&search, text, 0, text->size) == 17);
+	assert(search_backward(&search, text, 17, 18) == 17 && search_forward(&search, text, 18, text->size) == SIZE_MAX);
+}
+
+/* A case of the anchor that isn't there is looked for once, not once for each match */
 TEST(search_counts)
 {
 	static struct {
@@ -640,6 +664,77 @@ TEST(document_motions)
 	assert(document_move(document, DOCUMENT_RIGHT, false) && document->view.caret == 16);
 	assert(document_move(document, DOCUMENT_LEFT, false) && document->view.caret == 15);
 	assert(document_select_line(document, 14) && caret_at(document, 13, 16));
+}
+
+static void count_all(struct find *find, size_t budget)
+{
+	while (!find_count(find, budget))
+		;
+}
+
+/*
+ * A selection within a line becomes the query. A query that changed is found from where the search went last, around
+ * the end, and leaves the caret there without a match. Steps go around the ends too, and keep the index once all
+ * matches are counted.
+ */
+TEST(find_steps)
+{
+	static struct editing editing;
+	static struct find_memory memory;
+	static struct find find;
+	struct document *document = &editing.document;
+
+	document_of(&editing, "int x;\nint X2;\nreturn x;\n");
+	find_init(&find, &memory);
+	assert(document_select(document, 15, 21));
+	find_start(&find, document);
+	assert(text_is(&find.query.text, "return") && caret_at(&find.query, 0, 6) && find.match == 15 && !find_counted(&find));
+	count_all(&find, 5);
+	assert(find.count == 1 && find.index == 1 && !find_update(&find));
+	assert(find_insert(&find, arrview_str("x\ny")) && text_is(&find.query.text, "x") && find_update(&find));
+	assert(caret_at(document, 22, 23) && find.match == 22 && !find_counted(&find));
+	assert(find_step(&find, false) && caret_at(document, 4, 5));
+	count_all(&find, SIZE_MAX);
+	assert(find.count == 3 && find.index == 1);
+	assert(find_step(&find, true) && caret_at(document, 22, 23) && find.index == 3);
+	assert(find_step(&find, false) && caret_at(document, 4, 5) && find.index == 1);
+	assert(find_step(&find, false) && caret_at(document, 11, 12) && find.index == 2 && find_counted(&find));
+	assert(find_again(&find, document, false) == 22 && caret_at(document, 22, 23));
+	assert(document_select_all(&find.query) && type(&find.query, "Xq") && find_update(&find));
+	assert(find.match == SIZE_MAX && caret_at(document, 11, 11));
+	count_all(&find, SIZE_MAX);
+	assert(!find.count && !find_step(&find, false));
+	assert(document_select_all(&find.query) && type(&find.query, "int") && find_update(&find) && caret_at(document, 0, 3));
+}
+
+static bool jump_is(const struct jump *jump, const char *path, size_t offset)
+{
+	return jump && !strcmp(jump->path, path) && jump->offset == offset;
+}
+
+/*
+ * Going back from the newest jump keeps where it went, to go forward to. A jump forgets the way forward, and the
+ * oldest place when there is no room.
+ */
+TEST(jumps_go_back_and_forward)
+{
+	static struct jump places[3];
+	struct jumps jumps;
+
+	jumps_init(&jumps, places);
+	assert(!jumps_back(&jumps, "/a", 0) && !jumps_forward(&jumps));
+	jumps_push(&jumps, "/a", 1);
+	jumps_push(&jumps, "/b", 2);
+	assert(jump_is(jumps_back(&jumps, "/c", 3), "/b", 2) && jump_is(jumps_back(&jumps, "/b", 2), "/a", 1));
+	assert(!jumps_back(&jumps, "/a", 1) && jump_is(jumps_forward(&jumps), "/b", 2));
+	assert(jump_is(jumps_forward(&jumps), "/c", 3) && !jumps_forward(&jumps));
+	assert(jump_is(jumps_back(&jumps, "/c", 3), "/b", 2));
+	jumps_push(&jumps, "/d", 4);
+	assert(!jumps_forward(&jumps));
+	jumps_push(&jumps, "/e", 5);
+	jumps_push(&jumps, "/f", 6);
+	assert(jump_is(jumps_back(&jumps, "/g", 7), "/f", 6) && jump_is(jumps_back(&jumps, nullptr, 0), "/e", 5));
+	assert(!jumps_back(&jumps, nullptr, 0));
 }
 
 /* The classes of the tokens of a line after 'state', in order, and the state of the next line */

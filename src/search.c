@@ -6,6 +6,9 @@
 
 #include "search.h"
 
+/* Bytes of code and prose, from the most common on. The other ASCII bytes are rarer. */
+constexpr char COMMON[] = " e\tt_aoinsrlcdhu(),;.mpf=-gy>b*/wvk\"x0'1:2{}[]<#&q+!j|z\\";
+
 static bool capital(char c)
 {
 	return c >= 'A' && c <= 'Z';
@@ -16,16 +19,35 @@ static char fold(char c)
 	return capital(c) ? c - 'A' + 'a' : c;
 }
 
+/* A byte that starts a character of another script is as common as the script, one that follows it less so */
+static size_t rarity(char c)
+{
+	const char *common;
+
+	if ((unsigned char)c >= 0xc0)
+		return 0;
+	if ((unsigned char)c >= 0x80)
+		return ARRAY_SIZE(COMMON) / 2;
+	common = memchr(COMMON, c, ARRAY_SIZE(COMMON) - 1);
+	return common ? (size_t)(common - COMMON) : ARRAY_SIZE(COMMON);
+}
+
 static void update(struct search *search)
 {
+	auto query = arrview_first(search->size, search->query);
+
 	search->exact = false;
-	foreach_array_const_ref(arrview_first(search->size, search->query), c)
-		search->exact |= capital(*c);
+	search->anchor = 0;
+	foreach_array_index(query, i) {
+		search->exact |= capital((*query)[i]);
+		if (rarity((*query)[i]) > rarity((*query)[search->anchor]))
+			search->anchor = i;
+	}
 }
 
 void search_init(struct search *search)
 {
-	search->size = 0;
+	search->size = search->anchor = 0;
 	search->exact = false;
 }
 
@@ -73,9 +95,17 @@ bool search_at(const struct search *search, const struct text *text, size_t offs
 
 static char other_case(const struct search *search)
 {
-	char c = search->query[0];
+	char c = search->query[search->anchor];
 
 	return !search->exact && c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c;
+}
+
+/* The anchors of the matches that start from 'from' to before 'to' are from 'begin' to before 'end' */
+static void anchors(const struct search *search, const struct text *text, size_t from, size_t to, size_t *begin,
+		    size_t *end)
+{
+	*end = text->size - to > search->anchor ? to + search->anchor : text->size;
+	*begin = from + search->anchor < *end ? from + search->anchor : *end;
 }
 
 /* 'to' if 'c' isn't there */
@@ -96,33 +126,37 @@ static size_t last(const struct text *text, char c, size_t from, size_t to)
 	return at ? (size_t)(at - text->bytes) : SIZE_MAX;
 }
 
-/* Both cases of the first byte, each looked for again only after where it was found */
+/* Both cases of the anchor, each looked for again only after where it was found */
 struct starts {
-	size_t lower, upper, to;
+	size_t lower, upper, end, anchor, to;
 	char c, other;
 };
 
 static void starts_init(struct starts *starts, const struct search *search, const struct text *text, size_t from, size_t to)
 {
-	starts->c = search->query[0];
+	size_t begin;
+
+	anchors(search, text, from, to, &begin, &starts->end);
+	starts->anchor = search->anchor;
+	starts->c = search->query[search->anchor];
 	starts->other = other_case(search);
 	starts->to = to;
-	starts->lower = first(text, starts->c, from, to);
-	starts->upper = starts->other == starts->c ? to : first(text, starts->other, from, to);
+	starts->lower = first(text, starts->c, begin, starts->end);
+	starts->upper = starts->other == starts->c ? starts->end : first(text, starts->other, begin, starts->end);
 }
 
-/* 'to' once there are no more */
+/* Where the next match may start, 'to' once there are no more */
 static size_t starts_next(struct starts *starts, const struct text *text)
 {
 	size_t at = starts->lower < starts->upper ? starts->lower : starts->upper;
 
-	if (at == starts->to)
-		return at;
+	if (at == starts->end)
+		return starts->to;
 	if (at == starts->lower)
-		starts->lower = first(text, starts->c, at + 1, starts->to);
+		starts->lower = first(text, starts->c, at + 1, starts->end);
 	else
-		starts->upper = first(text, starts->other, at + 1, starts->to);
-	return at;
+		starts->upper = first(text, starts->other, at + 1, starts->end);
+	return at - starts->anchor;
 }
 
 size_t search_forward(const struct search *search, const struct text *text, size_t from, size_t to)
@@ -158,24 +192,25 @@ size_t search_count(const struct search *search, const struct text *text, size_t
 
 size_t search_backward(const struct search *search, const struct text *text, size_t from, size_t to)
 {
-	size_t lower, upper;
+	size_t lower, upper, begin, end;
 	char c, other;
 
 	if (!search->size || from >= to)
 		return SIZE_MAX;
-	c = search->query[0];
+	anchors(search, text, from, to, &begin, &end);
+	c = search->query[search->anchor];
 	other = other_case(search);
-	lower = last(text, c, from, to);
-	upper = other == c ? SIZE_MAX : last(text, other, from, to);
+	lower = last(text, c, begin, end);
+	upper = other == c ? SIZE_MAX : last(text, other, begin, end);
 	while (lower != SIZE_MAX || upper != SIZE_MAX) {
 		size_t at = upper == SIZE_MAX || (lower != SIZE_MAX && lower > upper) ? lower : upper;
 
-		if (search_at(search, text, at))
-			return at;
+		if (search_at(search, text, at - search->anchor))
+			return at - search->anchor;
 		if (at == lower)
-			lower = last(text, c, from, at);
+			lower = last(text, c, begin, at);
 		else
-			upper = last(text, other, from, at);
+			upper = last(text, other, begin, at);
 	}
 	return SIZE_MAX;
 }

@@ -7,8 +7,10 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "document.h"
+#include "file.h"
+#include "find.h"
+#include "jumps.h"
 #include "lsp.h"
-#include "search.h"
 #include "tree.h"
 
 constexpr size_t EDITOR_TABS = 16;
@@ -22,14 +24,10 @@ constexpr uint32_t EDITOR_CLICK_MS = 400;
 constexpr size_t EDITOR_TOKENS = 1 << 17;
 constexpr uint64_t EDITOR_HIGHLIGHT_NS = 250'000'000;
 constexpr uint64_t EDITOR_PROMPT_NS = 2'000'000'000;
-constexpr size_t EDITOR_QUERY_EDITS = 256;
-constexpr size_t EDITOR_QUERY_HISTORY = 16 << 10;
 constexpr size_t EDITOR_DETAILS = 256;
 constexpr char EDITOR_PROMPT[] = "Find: ";
 constexpr size_t EDITOR_INDEX_BYTES = 256 << 10;
 constexpr size_t EDITOR_COUNT_BYTES = 1 << 20;
-
-poor_loop_fd_declare(editor_file);
 
 enum : size_t {
 	EDITOR_MARK_TOKENS,
@@ -49,37 +47,24 @@ struct editor_token {
 };
 
 /*
- * A file in a tab and how it is read and written. The server has 'lsp_version' of the document, none for 0. Once
- * the file is read, the caret goes to 'jump_offset', or to 'jump_line' and 'jump_character' of the server. A tab
- * that is closed while it is saved closes once the save succeeds, unless input comes first. The file is 'inode' on
- * 'device' once it is 'identified': a tab that opens a file of another tab under another path gives way to that tab,
- * and one that would save over it doesn't. The 'tokens' of the server are of 'tokens_version' of the document.
+ * The document of a file in a tab. The server has 'lsp_version' of the document, none for 0. Once the file is read,
+ * the caret goes to 'jump_offset', or to 'jump_line' and 'jump_character' of the server. A tab that is closed while
+ * it is saved closes once the save succeeds, unless input comes first. A tab that opens a file of another tab under
+ * another path gives way to that tab, and one that would save over it doesn't. The 'tokens' of the server are of
+ * 'tokens_version' of the document.
  */
 struct editor_tab {
 	struct editor *editor;
 	struct document document;
-	editor_file file;
-	struct poor_loop_op open_op, read_op, create_op, stat_op, truncate_op, write_op, sync_op;
-	struct statx statx;
+	struct file file;
 	struct editor_token (*tokens)[EDITOR_TOKENS];
-	size_t done, size, digits, jump_offset, jump_line, jump_character, token_count;
-	uint64_t lsp_version, tokens_version, inode;
-	uint32_t device;
-	int error;
-	bool used, loading, indexing, saving, queued, closing, file_open, jump, close_saved, identified;
+	size_t digits, jump_offset, jump_line, jump_character, token_count;
+	uint64_t lsp_version, tokens_version;
+	bool used, loading, indexing, queued, closing, jump, close_saved;
 	char path[PATH_MAX];
 };
 
-/* Where the caret was before a jump */
-struct editor_jump {
-	size_t offset;
-	char path[PATH_MAX];
-};
-
-/*
- * The memory of the documents of the tabs, of the query, of the copy that is saved, of the jumps, the tree and the
- * server. The query is one line.
- */
+/* The memory of the documents of the tabs, of the search, of the copy that is saved, of the jumps, the tree and the server */
 struct editor_memory {
 	struct {
 		char bytes[EDITOR_BYTES];
@@ -89,15 +74,9 @@ struct editor_memory {
 		char history[HISTORY_BYTES];
 		struct editor_token tokens[EDITOR_TOKENS];
 	} documents[EDITOR_TABS];
-	struct {
-		char bytes[SEARCH_BYTES];
-		uint32_t lines[1];
-		uint8_t states[1];
-		struct history_edit edits[EDITOR_QUERY_EDITS];
-		char history[EDITOR_QUERY_HISTORY];
-	} query;
+	struct find_memory find;
 	char save[EDITOR_BYTES];
-	struct editor_jump jumps[EDITOR_JUMPS];
+	struct jump jumps[EDITOR_JUMPS];
 	struct tree_memory tree;
 	struct lsp_memory lsp;
 };
@@ -133,13 +112,12 @@ struct editor_listener {
 
 /*
  * Tabs of files, in the order of 'order', the tree of the root directory and the language server of the project.
- * The regions of the window are in buffer pixels, 'line' is how thick lines are. The jumps before 'jump_at' go back,
- * the others forward. A paste goes to the selection of 'paste_tab' that it was asked for, if the document stays as it
- * was. The editor quits once the files that are saved are, if 'quitting'. A close that waits for its confirmation is
- * of 'confirm_tab'. Clicks in a row near the last one, at 'click_x', 'click_y' of 'click_document', select words and
- * lines. The answer to 'request' goes somewhere if 'request_tab' stays active, at 'request_version' and 'request_caret'.
- * While 'searching', keys edit the 'query' in 'query_rect', whose match in 'search_tab' is selected. The search has the
- * query of 'query_version'. Matches are counted up to 'search_counted', 'search_index' of them up to 'search_match'.
+ * The regions of the window are in buffer pixels, 'line' is how thick lines are. A paste goes to the selection of
+ * 'paste_tab' that it was asked for, if the document stays as it was. The editor quits once the files that are saved
+ * are, if 'quitting'. A close that waits for its confirmation is of 'confirm_tab'. Clicks in a row near the last one,
+ * at 'click_x', 'click_y' of 'click_document', select words and lines. The answer to 'request' goes somewhere if
+ * 'request_tab' stays active, at 'request_version' and 'request_caret'. While 'searching', keys and the pastes that
+ * they ask for, 'paste_query', edit the query of 'find', which shows in 'query_rect'.
  */
 struct editor {
 	struct poor_loop *loop;
@@ -147,15 +125,13 @@ struct editor {
 	struct editor_memory *memory;
 	struct tree tree;
 	struct lsp lsp;
-	struct document query;
-	struct search search;
+	struct find find;
+	struct jumps jumps;
 	struct editor_tab *order[EDITOR_TABS];
-	struct editor_tab *saving, *search_tab;
+	struct editor_tab *saving;
 	struct poor_loop_timer highlight, indexing, counting, prompting;
-	size_t search_origin, search_match, search_counted, search_count, search_index;
 	size_t tab_count, active, tab_first;
-	size_t jump_count, jump_at;
-	uint64_t request, request_version, paste_version, highlight_version, query_version;
+	uint64_t request, request_version, paste_version, highlight_version;
 	struct editor_tab *request_tab, *paste_tab, *confirm_tab, *highlight_tab;
 	const struct document *click_document;
 	size_t request_caret, paste_anchor, paste_caret;
@@ -170,7 +146,6 @@ struct editor {
 	char root[PATH_MAX];
 	char status[EDITOR_STATUS];
 	char title[PATH_MAX];
-	char tree_cursor[PATH_MAX];
 	struct editor_tab tabs[EDITOR_TABS];
 };
 
@@ -186,8 +161,6 @@ void editor_layout(struct editor *editor);
 void editor_focus(struct editor *editor, bool focused);
 struct editor_tab *editor_tab(const struct editor *editor);
 bool editor_browsing(const struct editor *editor);
-/* The row that keys move in the tree, TREE_NONE without rows */
-uint32_t editor_tree_cursor(const struct editor *editor);
 /* What the status bar shows on the right: the matches, where the caret is and the server. Returns its cells. */
 size_t editor_details_impl(const struct editor *editor, size_t size, char (*out)[size]);
 #define editor_details(editor, out) editor_details_impl(editor, ARRAY_SIZE(out), &auto_arr(out))

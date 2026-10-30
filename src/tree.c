@@ -441,6 +441,7 @@ void tree_init(struct tree *tree, struct poor_loop *loop, const char *root, cons
 	tree->directory_open = tree->watching = tree->stopped = false;
 	snprintf_array(tree->root, "%s", root);
 	snprintf_array(tree->path, "%s", root);
+	tree->cursor[0] = 0;
 	tree->nodes[0] = (struct tree_node){
 		.parent = 0,
 		.first = 1,
@@ -600,6 +601,70 @@ bool tree_path_impl(const struct tree *tree, uint32_t node, size_t size, char (*
 	while (depth-- && length < size)
 		length += snprintf_array(arrview_cfront(length, path), "/%s", tree_name(tree, chain[depth]));
 	return length < size;
+}
+
+uint32_t tree_cursor(const struct tree *tree)
+{
+	uint32_t node = tree_nearest(tree, tree->cursor);
+
+	return node ? node : tree_next(tree, 0);
+}
+
+void tree_place(struct tree *tree, uint32_t node)
+{
+	if (!tree_path(tree, node, tree->cursor))
+		tree->cursor[0] = 0;
+}
+
+void tree_go(struct tree *tree, uint32_t node, size_t visible)
+{
+	size_t row;
+
+	if (node == TREE_NONE)
+		return;
+	tree_place(tree, node);
+	row = tree_row_of(tree, node);
+	if (row < tree->top)
+		tree->top = row;
+	else if (visible && row - tree->top >= visible)
+		tree->top = row - visible + 1;
+}
+
+void tree_move(struct tree *tree, ptrdiff_t rows, size_t visible)
+{
+	size_t row = tree_row_of(tree, tree_cursor(tree)), count = tree_rows(tree);
+	size_t distance = rows < 0 ? -(size_t)rows : (size_t)rows;
+
+	if (rows < 0)
+		row = distance < row ? row - distance : 0;
+	else
+		row = distance < count - row ? row + distance : count - 1;
+	tree_go(tree, tree_row(tree, row), visible);
+}
+
+void tree_seek_impl(struct tree *tree, size_t size, const char (*prefix)[size], size_t visible)
+{
+	uint32_t cursor = tree_cursor(tree), node = cursor;
+
+	if (cursor == TREE_NONE)
+		return;
+	do {
+		if ((node = tree_next(tree, node)) == TREE_NONE)
+			node = tree_next(tree, 0);
+	} while (node != cursor && strncasecmp(tree_name(tree, node), *prefix, size));
+	tree_go(tree, node, visible);
+}
+
+void tree_scroll(struct tree *tree, ptrdiff_t rows, size_t visible)
+{
+	size_t count = tree_rows(tree);
+
+	if (rows < 0)
+		tree->top = (size_t)-rows < tree->top ? tree->top - (size_t)-rows : 0;
+	else
+		tree->top += rows;
+	if (tree->top + visible > count)
+		tree->top = count > visible ? count - visible : 0;
 }
 
 void tree_stop(struct tree *tree)
