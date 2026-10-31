@@ -609,6 +609,11 @@ void input_server_key_repeated(uint32_t key)
 	poor_wl_keyboard_send_key(&server.keyboard, ++server.serial, 0, key, POOR_WL_KEYBOARD_KEY_STATE_REPEATED);
 }
 
+void input_server_repeat_info(int32_t rate, int32_t delay)
+{
+	poor_wl_keyboard_send_repeat_info(&server.keyboard, rate, delay);
+}
+
 static void client_done(struct poor_wl_client *)
 {
 	input_server.client_done = true;

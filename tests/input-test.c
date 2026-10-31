@@ -391,6 +391,34 @@ TEST(compositor_repeats)
 	stop(&loop);
 }
 
+/* A rate of 0 that comes while a key repeats stops the timer, the compositor repeats the key from then on */
+TEST(repeat_rate_becomes_zero)
+{
+	static struct client c;
+	struct poor_loop loop;
+	unsigned keys;
+
+	start(&loop);
+	input_server.repeat_rate = 100;
+	input_server.repeat_delay = 50;
+	client_start(&c, &loop);
+	input_server_keyboard_enter();
+	input_server_key(KEY_DOWN, true);
+	run_for(&loop, 100'000'000);
+	assert(c.keys > 1);
+	input_server_repeat_info(0, 50);
+	client_roundtrip(&c);
+	keys = c.keys;
+	run_for(&loop, 100'000'000);
+	assert(c.keys == keys);
+	input_server_key_repeated(KEY_DOWN);
+	client_roundtrip(&c);
+	assert(c.keys == keys + 1);
+	input_server_key(KEY_DOWN, false);
+	client_stop(&c);
+	stop(&loop);
+}
+
 /* Down repeats after the delay at the rate of the compositor, a wheel notch scrolls three lines */
 TEST(keys_and_wheel)
 {

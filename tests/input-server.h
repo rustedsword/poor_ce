@@ -39,6 +39,7 @@ void input_server_keyboard_modifiers(uint32_t depressed, uint32_t group);
 uint32_t input_server_key(uint32_t key, bool pressed);
 /* A repetition of a key that is down, after a repeat rate of 0 */
 void input_server_key_repeated(uint32_t key);
+void input_server_repeat_info(int32_t rate, int32_t delay);
 
 /* The selection or the primary selection writes into the returned pipe */
 int input_server_receive(bool primary, const char *mime);

@@ -662,6 +662,8 @@ static void keyboard_repeat_info(void *data, struct poor_wl_keyboard *, int32_t 
 
 	seat->repeat_rate = rate;
 	seat->repeat_delay = delay;
+	if (rate <= 0)
+		poor_loop_timer_disarm(&seat->repeat);
 }
 
 static const struct poor_wl_keyboard_listener keyboard_listener = {
