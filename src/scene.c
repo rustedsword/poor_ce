@@ -91,7 +91,7 @@ static void outline(struct scene *scene, int32_t x, int32_t y, int32_t width, in
 
 static bool typing(const struct editor *editor)
 {
-	return editor->focused && !editor_browsing(editor) && !editor->searching;
+	return editor->focused && !editor_browsing(editor) && !editor_querying(editor);
 }
 
 static void glyph(struct scene *scene, int32_t x, int32_t y, uint32_t codepoint, uint32_t color)
@@ -342,7 +342,8 @@ static const struct {
 	{ { "Ctrl+S", "Save" }, { "Ctrl+Q", "Quit" } },
 	{ { "Ctrl+Enter", "Definition" }, { "Ctrl+Shift+Enter", "Declaration" } },
 	{ { "Alt+Left", "Back" }, { "Alt+Right", "Forward" } },
-	{ { "Ctrl+F", "Find" }, { "F3/Shift+F3", "Next/previous match" } },
+	{ { "Ctrl+F", "Find" }, { "Ctrl+G", "Go to line" } },
+	{ { "F3", "Next match" }, { "Shift+F3", "Previous match" } },
 	{ { "Ctrl+Z", "Undo" }, { "Ctrl+Shift+Z", "Redo" } },
 	{ { "Ctrl+C", "Copy" }, { "Ctrl+V", "Paste" } },
 	{ { "Ctrl+X", "Cut" }, { "Ctrl+A", "Select all" } },
@@ -450,14 +451,14 @@ static void prompt(struct scene *scene, int32_t x, int32_t y, int32_t end)
 {
 	const struct editor *editor = scene->editor;
 	const struct editor_rect *rect = &editor->query_rect;
-	const struct document *query = &editor->find.query;
+	const struct document *query = editor->going ? &editor->go.query : &editor->find.query;
 	const struct text *text = &query->text;
 	const struct view *view = &query->view;
 	int32_t cell = editor->cell_width;
 	size_t columns = view_columns(view), caret = text_column_of(text, 0, view->caret), start, stop;
 	struct text_char c;
 
-	label(scene, x, y, end, EDITOR_PROMPT, DIM);
+	label(scene, x, y, end, editor->going ? EDITOR_LINE_PROMPT : EDITOR_FIND_PROMPT, DIM);
 	if (view_selection(view, &start, &stop)) {
 		size_t from = text_column_of(text, 0, start), to = text_column_of(text, 0, stop);
 
@@ -502,7 +503,7 @@ static void status_bar(struct scene *scene)
 	group(scene);
 	label(scene, end, y, rect->x + rect->width, right, DIM);
 	group(scene);
-	if (editor->searching && !editor->status[0])
+	if (editor_querying(editor) && !editor->status[0])
 		prompt(scene, start, y, end - editor->cell_width);
 	else
 		label(scene, start, y, end - editor->cell_width, left, TEXT);

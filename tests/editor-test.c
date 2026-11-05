@@ -2522,3 +2522,245 @@ TEST(editor_clicks_the_query)
 	stop(&editor, &loop);
 	project_fini(&project);
 }
+
+static bool number_is(const char *contents)
+{
+	const struct text *text = &editor.go.query.text;
+
+	return text->size == strlen(contents) && !memcmp(text->bytes, contents, text->size);
+}
+
+/*
+ * Ctrl+G takes the caret to the start of the line whose number is typed, after "Line: ", and only digits go in. Enter
+ * leaves the caret there, and where it was to go back to if it left. Esc takes it back.
+ */
+TEST(editor_goes_to_lines)
+{
+	static struct project project;
+	static struct atlas atlas;
+	static struct frame frame;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	struct font font;
+	int32_t x, y;
+	uint16_t u, v;
+	bool caret = false, prompt = false;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	assert(font_init(&font, 15));
+	atlas_init(&atlas, &font);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_focus(&editor, true);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	assert(document_place(&tab->document, 5, false));
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_2, 0, "2");
+	assert(editor.going && caret_of(tab, 7, 7));
+	type(&editor, XKB_KEY_x, 0, "x");
+	type(&editor, XKB_KEY_Tab, 0, "\t");
+	type(&editor, XKB_KEY_9, 0, "9");
+	assert(number_is("29") && caret_of(tab, 25, 25));
+	x = editor.status_rect.x + editor.padding;
+	y = editor.status_rect.y + editor.padding;
+	scene_build(&editor, &atlas, &frame);
+	assert(atlas_find(&atlas, 'L', &u, &v));
+	foreach_array_const_ref(arrview_first(frame.count, frame.quads), quad) {
+		caret |= quad->u == QUAD_SOLID && quad->color == QUAD_RGB(THEME_CARET) && quad->x == x + 8 * editor.cell_width &&
+			 quad->y == y;
+		prompt |= quad->u == u && quad->v == v && quad->x == x && quad->y == y;
+	}
+	assert(caret && prompt && caret_color(&atlas, &frame) == QUAD_RGB(THEME_DIM));
+	type(&editor, XKB_KEY_BackSpace, 0, "");
+	assert(number_is("2") && caret_of(tab, 7, 7));
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(!editor.going && caret_of(tab, 7, 7) && editor.jumps.at == 1);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_0, 0, "0");
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	assert(!editor.going && caret_of(tab, 7, 7) && editor.jumps.at == 1);
+	assert(document_place(&tab->document, 0, false) && document_place(&tab->document, 3, true));
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_3, 0, "3");
+	assert(number_is("3") && caret_of(tab, 15, 15));
+	type(&editor, XKB_KEY_Escape, 0, "");
+	assert(!editor.going && caret_of(tab, 0, 3) && editor.jumps.at == 1);
+	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
+	assert(caret_of(tab, 5, 5) && text_is(tab, "int x;\nint X2;\nreturn x;\n"));
+	stop(&editor, &loop);
+	font_fini(&font);
+	project_fini(&project);
+}
+
+/* Esc takes the view back as it was too, while a click ends going to lines where they went, as a jump */
+TEST(editor_goes_to_lines_out_of_sight)
+{
+	static struct project project;
+	static char contents[2 * 100 + 1];
+	const struct view *view;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	for (size_t at = 0; at < sizeof(contents) - 1; at += 2)
+		memcpy(&contents[at], "x\n", 2);
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", contents);
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	view = &tab->document.view;
+	editor_scroll(&editor, editor.text_rect.x + 1, editor.text_rect.y + 1, 5, 0);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_5, 0, "5");
+	type(&editor, XKB_KEY_0, 0, "0");
+	assert(caret_of(tab, 98, 98) && view->top == 49 - view_rows(view) / 3);
+	type(&editor, XKB_KEY_Escape, 0, "");
+	assert(caret_of(tab, 0, 0) && view->top == 5);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_5, 0, "5");
+	type(&editor, XKB_KEY_0, 0, "0");
+	click(editor.text_rect.x + 5, editor.text_rect.y + 5, 0);
+	assert(!editor.going && caret_of(tab, 80, 80) && view->top == 40 && editor.jumps.at == 1);
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/*
+ * A paste goes into the number if its first line is digits. Ctrl+F and Ctrl+G go from one query to the other, which
+ * drops a paste that the first one asked for, and another tab ends going to lines.
+ */
+TEST(editor_switches_queries)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+	unsigned pastes = events.pastes;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	assert(events.pastes == pastes + 1 && !events.primary);
+	editor_paste(&editor, arrview_str("3\nx"));
+	assert(editor.going && number_is("3") && caret_of(tab, 15, 15));
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("x3"));
+	assert(number_is("3") && caret_of(tab, 15, 15));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_x, 0, "x");
+	assert(editor.searching && !editor.going && caret_of(tab, 22, 23));
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	assert(editor.going && !editor.searching && number_is(""));
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("1"));
+	assert(editor.searching && caret_of(tab, 22, 23) && number_is(""));
+	snprintf_array(project.path, "%s/tar get.h", project.root);
+	editor_open(&editor, project.path);
+	loaded(&editor, &loop);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	assert(editor_tab(&editor) == tab && !editor.going);
+	type(&editor, XKB_KEY_y, 0, "y");
+	assert(text_is(tab, "int x;\nint X2;\nreturn y;\n"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/*
+ * A query that ends with the caret elsewhere is a jump from where it was, whatever ends it: Esc after a search,
+ * Alt+Left, which goes back there, or another tab.
+ */
+TEST(editor_jumps_from_queries)
+{
+	static struct project project;
+	struct editor_tab *tab, *other;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	assert(document_place(&tab->document, 5, false));
+	type(&editor, XKB_KEY_f, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_r, 0, "r");
+	type(&editor, XKB_KEY_Escape, 0, "");
+	assert(!editor.searching && caret_of(tab, 15, 16) && editor.jumps.at == 1);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_2, 0, "2");
+	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
+	assert(!editor.going && caret_of(tab, 16, 16));
+	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
+	assert(caret_of(tab, 5, 5));
+	type(&editor, XKB_KEY_Right, SEAT_ALT, "");
+	type(&editor, XKB_KEY_Right, SEAT_ALT, "");
+	assert(caret_of(tab, 7, 7));
+	snprintf_array(project.path, "%s/tar get.h", project.root);
+	editor_open(&editor, project.path);
+	other = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_3, 0, "3");
+	type(&editor, XKB_KEY_Tab, SEAT_CONTROL, "");
+	assert(editor_tab(&editor) == other && !editor.going);
+	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
+	assert(editor_tab(&editor) == tab && caret_of(tab, 7, 7));
+	stop(&editor, &loop);
+	project_fini(&project);
+}
+
+/* A late paste that ends a query leaves a jump only if the query took the caret away before it came */
+TEST(editor_jumps_from_queries_through_late_pastes)
+{
+	static struct project project;
+	struct editor_tab *tab;
+	struct poor_loop loop;
+
+	loop_init(&loop);
+	log_init(&loop, "editor-test");
+	project_init(&project);
+	write_file(&project, "main.c", "int x;\nint X2;\nreturn x;\n");
+	editor_init(&editor, &loop, &listener, &memory);
+	editor_start(&editor, project.root, nullptr);
+	editor_resize(&editor, 800, 600, 10, 20, 4, 120);
+	editor_open(&editor, project.path);
+	tab = loaded(&editor, &loop);
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_3, 0, "3");
+	type(&editor, XKB_KEY_Return, 0, "\r");
+	type(&editor, XKB_KEY_Left, SEAT_ALT, "");
+	assert(caret_of(tab, 0, 0) && !editor.jumps.at && editor.jumps.count == 2);
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	editor_paste(&editor, arrview_str("y"));
+	assert(!editor.going && caret_of(tab, 1, 1) && !editor.jumps.at && editor.jumps.count == 2);
+	type(&editor, XKB_KEY_v, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_g, SEAT_CONTROL, "");
+	type(&editor, XKB_KEY_2, 0, "2");
+	editor_paste(&editor, arrview_str("z"));
+	assert(!editor.going && caret_of(tab, 2, 2) && editor.jumps.at == 1 && editor.jumps.count == 1);
+	assert(text_is(tab, "yzint x;\nint X2;\nreturn x;\n"));
+	stop(&editor, &loop);
+	project_fini(&project);
+}

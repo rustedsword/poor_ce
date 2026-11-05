@@ -8,6 +8,7 @@
 #include "atlas.h"
 #include "document.h"
 #include "find.h"
+#include "go.h"
 #include "json.h"
 #include "jumps.h"
 #include "path.h"
@@ -705,6 +706,56 @@ TEST(find_steps)
 	count_all(&find, SIZE_MAX);
 	assert(!find.count && !find_step(&find, false));
 	assert(document_select_all(&find.query) && type(&find.query, "int") && find_update(&find) && caret_at(document, 0, 3));
+}
+
+/*
+ * The caret goes to the start of the line that the query numbers from 1, the last one past the end, which goes to the
+ * upper third if it doesn't show. Without a line, the caret, its column for going up and down, and the view go back to
+ * where they were. Only the digits of a first line go into the query, which starts empty.
+ */
+TEST(go_follows_lines)
+{
+	static struct editing editing;
+	static struct go_memory memory;
+	static struct go go;
+	struct document *document = &editing.document;
+	const struct view *view = &document->view;
+
+	document_of(&editing, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\n");
+	go_init(&go, &memory);
+	assert(document_select(document, 21, 20) && view->top == 6);
+	go_start(&go, document);
+	go_update(&go);
+	assert(caret_at(document, 21, 20));
+	assert(!go_insert(&go, arrview_str("x")) && !go_insert(&go, arrview_str("2x")) && go_insert(&go, arrview_str("2\n3")));
+	go_update(&go);
+	assert(text_is(&go.query.text, "2") && caret_at(document, 2, 2) && !view->top);
+	assert(go_insert(&go, arrview_str("0")));
+	go_update(&go);
+	assert(caret_at(document, 32, 32) && view->top == 12);
+	assert(document_select_all(&go.query) && go_insert(&go, arrview_str("12")));
+	go_update(&go);
+	assert(caret_at(document, 22, 22) && view->top == 10);
+	assert(document_select_all(&go.query) && go_insert(&go, arrview_str("14")));
+	go_update(&go);
+	assert(caret_at(document, 26, 26) && view->top == 10);
+	assert(document_select_all(&go.query) && go_insert(&go, arrview_str("0")));
+	go_update(&go);
+	assert(caret_at(document, 21, 20) && view->top == 6);
+	assert(document_place(document, 0, false) && view_scroll(&document->view, 3, 0));
+	go_start(&go, document);
+	assert(!go.query.text.size && go_insert(&go, arrview_str("16")));
+	go_update(&go);
+	assert(caret_at(document, 30, 30) && view->top == 12);
+	go_back(&go);
+	assert(caret_at(document, 0, 0) && view->top == 3);
+	document_of(&editing, "long\nx\nlong\n");
+	assert(document_place(document, 3, false) && document_move(document, DOCUMENT_DOWN, false) && caret_at(document, 6, 6));
+	go_start(&go, document);
+	assert(go_insert(&go, arrview_str("1")));
+	go_update(&go);
+	go_back(&go);
+	assert(document_move(document, DOCUMENT_DOWN, false) && caret_at(document, 10, 10));
 }
 
 static bool jump_is(const struct jump *jump, const char *path, size_t offset)
