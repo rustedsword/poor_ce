@@ -35,6 +35,7 @@
  * feedback and presented through the swapchain with explicit synchronization. It runs until its close button, Ctrl+Q,
  * SIGINT or SIGTERM. WAYLAND_DEBUG=client shows the protocol.
  */
+/* Used only when the compositor supplies neither a size nor bounds */
 constexpr int32_t DEFAULT_WIDTH = 1100;
 constexpr int32_t DEFAULT_HEIGHT = 700;
 constexpr int32_t PADDING = 4;
@@ -78,6 +79,7 @@ struct app {
 	size_t path_count;
 	int status, drm_fd, idle_fd;
 	int32_t width, height, pending_width, pending_height;
+	int32_t bounds_width, bounds_height;
 	uint32_t scale, font_pixels;
 	bool have_compositor, have_dmabuf, have_syncobj, have_wm_base;
 	bool have_decoration_manager, have_fractional_manager, have_viewporter, have_window;
@@ -432,7 +434,7 @@ static const struct poor_xdg_surface_listener shell_surface_listener = {
 	.configure = shell_surface_configure,
 };
 
-/* A size of 0 leaves the size to the client */
+/* A size of 0 uses the available space at startup, the current size afterwards */
 static void toplevel_configure(void *data, struct poor_xdg_toplevel *, int32_t width, int32_t height, struct poor_wl_array *states)
 {
 	struct app *app = data;
@@ -440,6 +442,12 @@ static void toplevel_configure(void *data, struct poor_xdg_toplevel *, int32_t w
 
 	app->pending_width = width > 0 ? width : app->width;
 	app->pending_height = height > 0 ? height : app->height;
+	if (!app->have_window) {
+		if (!width && app->bounds_width > 0)
+			app->pending_width = app->bounds_width;
+		if (!height && app->bounds_height > 0)
+			app->pending_height = app->bounds_height;
+	}
 	app->pending_activated = false;
 	poor_wl_array_for_each(state, states)
 		if (*state == POOR_XDG_TOPLEVEL_STATE_ACTIVATED)
@@ -451,8 +459,12 @@ static void toplevel_close(void *, struct poor_xdg_toplevel *)
 	editor_quit(&editor);
 }
 
-static void toplevel_configure_bounds(void *, struct poor_xdg_toplevel *, int32_t, int32_t)
+static void toplevel_configure_bounds(void *data, struct poor_xdg_toplevel *, int32_t width, int32_t height)
 {
+	struct app *app = data;
+
+	app->bounds_width = width;
+	app->bounds_height = height;
 }
 
 static void toplevel_wm_capabilities(void *, struct poor_xdg_toplevel *, struct poor_wl_array *)
@@ -662,6 +674,7 @@ static void app_prepare(struct app *app)
 	app->drm_fd = app->idle_fd = -1;
 	app->width = app->pending_width = DEFAULT_WIDTH;
 	app->height = app->pending_height = DEFAULT_HEIGHT;
+	app->bounds_width = app->bounds_height = 0;
 	app->scale = 120;
 	app->have_compositor = app->have_dmabuf = app->have_syncobj = app->have_wm_base = false;
 	app->have_decoration_manager = app->have_fractional_manager = app->have_viewporter = app->have_window = false;
